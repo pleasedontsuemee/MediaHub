@@ -1,0 +1,24 @@
+# macOS / Linux
+.DS_Store
+*~
+
+# SwiftPM & xtool
+.build/
+.swiftpm/
+xtool/
+*.ipa
+*.xcworkspace/xcuserdata/
+*.xcodeproj/xcuserdata/
+
+# Android & Gradle
+.gradle/
+.kotlin/
+build/
+*/build/
+local.properties
+*.apk
+*.aab
+*.jks
+*.keystore
+captures/
+.idea/

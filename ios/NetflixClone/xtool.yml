@@ -1,0 +1,5 @@
+version: 1
+bundleID: com.movix.netflixclone
+product: NetflixClone
+infoPath: NetflixClone/Info.plist
+iconPath: NetflixClone/Assets.xcassets/AppIcon.appiconset/AppIcon.png

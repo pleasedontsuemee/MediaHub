@@ -1,0 +1,5 @@
+version: 1
+bundleID: com.skyrock.spotifyclone
+product: SpotifyClone
+infoPath: SpotifyClone/Info.plist
+iconPath: SpotifyClone/Assets.xcassets/AppIcon.appiconset/AppIcon.png
