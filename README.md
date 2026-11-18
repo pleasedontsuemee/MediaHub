@@ -55,20 +55,6 @@
 
 ---
 
-## Visual Showcase
-
-### YouTube — Adaptive Phone & Tablet Player with True Quality Switching
-<div align="center">
-  <img src="docs/images/showcase_youtube.jpg" alt="YouTube iPhone and Android Tablet UI Showcase" width="92%" />
-</div>
-
-- **True Resolution Switching (`Auto` → `2160p 4K`)**:
-  - **iOS**: Localhost HTTP HLS server (`127.0.0.1`) with `sidx` 5-second fMP4 segment streaming & HLS master playlist pinning (`preferredMaximumResolution` + variant isolation).
-  - **Android**: Media3 ExoPlayer `TrackSelectionOverride` on `C.TRACK_TYPE_VIDEO` with automatic progressive fallback and seamless seek preservation.
-- **Responsive Layout**: 1-column feed on phones, 2–3 column grid and **2-pane widescreen watch view** on tablets.
-
----
-
 ## Key Features
 
 ### YouTube (`YouTubeClone` / `:youtube`)
