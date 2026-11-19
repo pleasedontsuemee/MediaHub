@@ -47,13 +47,6 @@
   </tr>
 </table>
 
----
-
-## Visual Showcase
-
-<div align="center">
-  <img src="docs/images/showcase_youtube.jpg" alt="YouTube iPhone and Android Tablet UI Showcase" width="92%" />
-</div>
 
 ---
 
