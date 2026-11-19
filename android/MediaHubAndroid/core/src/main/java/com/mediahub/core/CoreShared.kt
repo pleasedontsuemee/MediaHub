@@ -4,12 +4,19 @@ import android.app.Activity
 import android.content.Context
 import android.content.ContextWrapper
 import android.content.pm.ActivityInfo
+import android.view.WindowManager
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.viewinterop.AndroidView
@@ -86,16 +93,49 @@ fun ExoVideoSurface(
     zoomToFill: Boolean = false,
     modifier: Modifier = Modifier.fillMaxSize()
 ) {
+    val context = LocalContext.current
+    var keepAwake by remember(player) {
+        mutableStateOf(player.isPlaying || (player.playWhenReady && player.playbackState == Player.STATE_BUFFERING))
+    }
+
+    DisposableEffect(player) {
+        val listener = object : Player.Listener {
+            private fun refresh() {
+                keepAwake = player.isPlaying || (player.playWhenReady && player.playbackState == Player.STATE_BUFFERING)
+            }
+            override fun onIsPlayingChanged(isPlaying: Boolean) { refresh() }
+            override fun onPlaybackStateChanged(playbackState: Int) { refresh() }
+            override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) { refresh() }
+        }
+        player.addListener(listener)
+        onDispose {
+            player.removeListener(listener)
+            context.findActivity()?.window?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        }
+    }
+
+    DisposableEffect(keepAwake) {
+        val window = context.findActivity()?.window
+        if (keepAwake) {
+            window?.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        } else {
+            window?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        }
+        onDispose { }
+    }
+
     AndroidView(
         factory = { ctx ->
             PlayerView(ctx).apply {
                 useController = false
                 this.player = player
+                this.keepScreenOn = keepAwake
                 resizeMode = if (zoomToFill) AspectRatioFrameLayout.RESIZE_MODE_ZOOM else AspectRatioFrameLayout.RESIZE_MODE_FIT
             }
         },
         update = { pv ->
             if (pv.player !== player) pv.player = player
+            if (pv.keepScreenOn != keepAwake) pv.keepScreenOn = keepAwake
             pv.resizeMode = if (zoomToFill) AspectRatioFrameLayout.RESIZE_MODE_ZOOM else AspectRatioFrameLayout.RESIZE_MODE_FIT
         },
         modifier = modifier

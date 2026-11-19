@@ -102,7 +102,7 @@ public final class SPOfflineDownloadManager: ObservableObject {
 
     public nonisolated static func localFileURL(for trackId: String) -> URL? {
         let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
-        for ext in ["m4a", "mp3", "mp4"] {
+        for ext in ["m4a", "mp3", "mp4", "wav", "aac", "aiff"] {
             let u = docs.appendingPathComponent("SPOfflineDownloads/\(trackId).\(ext)")
             if FileManager.default.fileExists(atPath: u.path) {
                 return u
@@ -166,6 +166,78 @@ public final class SPOfflineDownloadManager: ObservableObject {
             }
         } catch {}
         return false
+    }
+
+    public func importLocalAudioFile(from sourceURL: URL) async -> SPTrack? {
+        await importLocalFile(from: sourceURL)
+    }
+
+    public func importLocalFile(from sourceURL: URL) async -> SPTrack? {
+        let accessing = sourceURL.startAccessingSecurityScopedResource()
+        defer {
+            if accessing {
+                sourceURL.stopAccessingSecurityScopedResource()
+            }
+        }
+
+        let ext = sourceURL.pathExtension.isEmpty ? "mp3" : sourceURL.pathExtension.lowercased()
+        let rawName = sourceURL.deletingPathExtension().lastPathComponent
+        let sanitizedId = "local_" + String(abs(sourceURL.lastPathComponent.hashValue))
+        let fileName = "\(sanitizedId).\(ext)"
+        let dest = downloadsDir.appendingPathComponent(fileName)
+
+        do {
+            if FileManager.default.fileExists(atPath: dest.path) {
+                try FileManager.default.removeItem(at: dest)
+            }
+            try FileManager.default.copyItem(at: sourceURL, to: dest)
+        } catch {
+            return nil
+        }
+
+        let size = (try? FileManager.default.attributesOfItem(atPath: dest.path)[.size] as? Int64) ?? 0
+        let asset = AVURLAsset(url: dest)
+        var title = rawName.isEmpty ? "Fichier audio" : rawName
+        var artist = "Fichier local"
+        var album = "Importés"
+        var durationSec = 0
+
+        if let dur = try? await asset.load(.duration) {
+            let secs = CMTimeGetSeconds(dur)
+            if secs.isFinite && secs > 0 {
+                durationSec = Int(secs)
+            }
+        }
+        if let meta = try? await asset.load(.commonMetadata) {
+            for item in meta {
+                if item.commonKey == .commonKeyTitle, let val = try? await item.load(.stringValue), !val.isEmpty {
+                    title = val
+                } else if item.commonKey == .commonKeyArtist, let val = try? await item.load(.stringValue), !val.isEmpty {
+                    artist = val
+                } else if item.commonKey == .commonKeyAlbumName, let val = try? await item.load(.stringValue), !val.isEmpty {
+                    album = val
+                }
+            }
+        }
+
+        let track = SPTrack(
+            id: sanitizedId,
+            title: title,
+            artistName: artist,
+            artistId: nil,
+            albumTitle: album,
+            albumId: nil,
+            coverURLString: nil,
+            durationSeconds: max(1, durationSec),
+            previewURLString: nil,
+            directAudioURLString: dest.absoluteString,
+            isExplicit: false
+        )
+        let entry = SPOfflineDownload(track: track, localFileName: fileName, fileSizeBytes: size, downloadedAt: Date())
+        downloads.removeAll { $0.id == track.id }
+        downloads.insert(entry, at: 0)
+        saveMetadata()
+        return track
     }
 
     public func removeDownload(trackId: String) {

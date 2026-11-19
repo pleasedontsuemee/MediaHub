@@ -10,7 +10,9 @@ public struct YTVideoStreamFormat: Identifiable, Hashable, Codable {
             // Check if non-16:9 (e.g., 2:1 / 18:9 Univisium 3840x1920, 2560x1280, 1920x960 or 21:9 ultrawide)
             let ratio = Double(w) / Double(max(1, h))
             let isNonStandardRatio = abs(ratio - (16.0 / 9.0)) > 0.08
-            if h >= 1900 || w >= 3800 {
+            if h >= 4000 || w >= 7600 {
+                return isNonStandardRatio ? "\(qualityLabel) 8K (\(w)×\(h))" : "\(qualityLabel) (8K)"
+            } else if h >= 1900 || w >= 3800 {
                 return isNonStandardRatio ? "\(qualityLabel) 4K (\(w)×\(h))" : "\(qualityLabel) (4K)"
             } else if h >= 1200 || w >= 2500 {
                 return isNonStandardRatio ? "\(qualityLabel) QHD (\(w)×\(h))" : "\(qualityLabel) (QHD)"
@@ -37,6 +39,23 @@ public struct YTVideoStreamFormat: Identifiable, Hashable, Codable {
     public let audioTrackId: String?
     public let audioTrackName: String?
     public let isAudioDefault: Bool
+    public let userAgent: String?
+    public let fps: Int?
+    public let videoRange: String? // "PQ", "HLG", or "SDR"
+
+    public var isHDR: Bool {
+        videoRange == "PQ" || videoRange == "HLG" || qualityLabel.localizedCaseInsensitiveContains("HDR")
+    }
+
+    public var extractedCodec: String? {
+        guard let range = mimeType.range(of: #"codecs="([^"]+)""#, options: .regularExpression) else {
+            return nil
+        }
+        return String(mimeType[range])
+            .replacingOccurrences(of: "codecs=\"", with: "")
+            .replacingOccurrences(of: "\"", with: "")
+            .trimmingCharacters(in: .whitespaces)
+    }
 
     public init(
         itag: Int,
@@ -55,7 +74,10 @@ public struct YTVideoStreamFormat: Identifiable, Hashable, Codable {
         indexRangeEnd: Int64? = nil,
         audioTrackId: String? = nil,
         audioTrackName: String? = nil,
-        isAudioDefault: Bool = false
+        isAudioDefault: Bool = false,
+        userAgent: String? = nil,
+        fps: Int? = nil,
+        videoRange: String? = nil
     ) {
         self.itag = itag
         self.url = url
@@ -74,6 +96,9 @@ public struct YTVideoStreamFormat: Identifiable, Hashable, Codable {
         self.audioTrackId = audioTrackId
         self.audioTrackName = audioTrackName
         self.isAudioDefault = isAudioDefault
+        self.userAgent = userAgent
+        self.fps = fps
+        self.videoRange = videoRange
     }
 }
 
@@ -405,6 +430,7 @@ public struct YTResolvedVideoPlayback {
 
     public static func targetHeight(for preferredQuality: String) -> Int? {
         guard preferredQuality != "Auto (recommended)", !preferredQuality.isEmpty else { return nil }
+        if preferredQuality.contains("4320") || preferredQuality.contains("8K") { return 4320 }
         if preferredQuality.contains("2160") || preferredQuality.contains("4K") { return 2160 }
         if preferredQuality.contains("1440") || preferredQuality.contains("QHD") { return 1440 }
         let digits = preferredQuality

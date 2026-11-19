@@ -31,10 +31,14 @@ import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
+import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.TrackSelectionOverride
 import androidx.media3.common.Tracks
+import androidx.media3.datasource.DefaultHttpDataSource
+import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import coil.compose.AsyncImage
 import com.mediahub.core.*
 import kotlinx.coroutines.launch
@@ -46,8 +50,25 @@ enum class YTTab(val label: String) {
     LIBRARY("Vous")
 }
 
+@androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
 class YouTubeViewModel(app: Application) : AndroidViewModel(app) {
-    val player: ExoPlayer = ExoPlayer.Builder(app).build()
+    val player: ExoPlayer = ExoPlayer.Builder(app)
+        .setLoadControl(
+            DefaultLoadControl.Builder()
+                .setBufferDurationsMs(45_000, 90_000, 1_200, 2_500)
+                .setPrioritizeTimeOverSizeThresholds(true)
+                .build()
+        )
+        .setMediaSourceFactory(
+            DefaultMediaSourceFactory(
+                DefaultHttpDataSource.Factory()
+                    .setUserAgent(YouTubeEngine.VISIONOS_UA)
+                    .setAllowCrossProtocolRedirects(true)
+                    .setConnectTimeoutMs(15_000)
+                    .setReadTimeoutMs(30_000)
+            )
+        )
+        .build()
 
     var selectedTab by mutableStateOf(YTTab.HOME)
     var selectedChip by mutableStateOf("Tout")
@@ -67,10 +88,44 @@ class YouTubeViewModel(app: Application) : AndroidViewModel(app) {
 
     private var currentStreamInfo: YTStreamInfo? = null
     private var isUsingHls: Boolean = false
+    private var watchKeywords = mutableListOf<String>()
+    private var watchedIds = mutableSetOf<String>()
+    private var streamRecoveryCounts = mutableMapOf<String, Int>()
+    private var isRecoveringStream = false
 
     private val playerListener = object : Player.Listener {
         override fun onIsPlayingChanged(isPlayingNow: Boolean) {
             isPlaying = isPlayingNow
+        }
+
+        override fun onPlayerError(error: PlaybackException) {
+            val vid = currentVideo ?: return
+            val attempts = streamRecoveryCounts[vid.id] ?: 0
+            if (isRecoveringStream || attempts >= 3) return
+            isRecoveringStream = true
+            streamRecoveryCounts[vid.id] = attempts + 1
+            val resumePos = player.currentPosition.coerceAtLeast(0L)
+            viewModelScope.launch {
+                val info = YouTubeEngine.resolveStreamInfo(vid.id, forceRefresh = true)
+                if (info != null && currentVideo?.id == vid.id) {
+                    currentStreamInfo = info
+                    if (info.hlsUrl != null) {
+                        isUsingHls = true
+                        applyHlsQuality(selectedQualityHeight)
+                        player.setMediaItem(MediaItem.fromUri(info.hlsUrl))
+                    } else {
+                        val chosen = pickProgressiveFormat(info.progressiveFormats, selectedQualityHeight)
+                        if (chosen != null) {
+                            isUsingHls = false
+                            player.setMediaItem(MediaItem.fromUri(chosen.url))
+                        }
+                    }
+                    player.prepare()
+                    if (resumePos > 0L) player.seekTo(resumePos)
+                    player.play()
+                }
+                isRecoveringStream = false
+            }
         }
 
         override fun onTracksChanged(tracks: Tracks) {
@@ -111,11 +166,29 @@ class YouTubeViewModel(app: Application) : AndroidViewModel(app) {
 
     init {
         player.addListener(playerListener)
-        loadFeed("trending france")
+        loadHomeFeed("Tout")
         loadShorts()
     }
 
+    fun loadHomeFeed(chip: String = selectedChip) {
+        viewModelScope.launch {
+            isLoading = true
+            videos = YouTubeEngine.fetchPersonalizedHomeFeed(
+                chip = chip,
+                watchKeywords = watchKeywords,
+                subscribedChannels = subscribedChannels,
+                watchedIds = watchedIds
+            )
+            isLoading = false
+        }
+    }
+
     fun loadFeed(query: String) {
+        if (query.isNotBlank() && query != "Tout") {
+            watchKeywords.removeAll { it.equals(query, ignoreCase = true) }
+            watchKeywords.add(0, query)
+            if (watchKeywords.size > 10) watchKeywords = watchKeywords.take(10).toMutableList()
+        }
         viewModelScope.launch {
             isLoading = true
             videos = YouTubeEngine.fetchFeed(query)
@@ -136,6 +209,14 @@ class YouTubeViewModel(app: Application) : AndroidViewModel(app) {
         activeQualityHeight = null
         currentStreamInfo = null
         isUsingHls = false
+        streamRecoveryCounts[video.id] = 0
+        watchedIds.add(video.id)
+        val kw = "${video.channelTitle} ${video.title.split(" ").filter { it.length >= 4 }.take(2).joinToString(" ")}".trim()
+        if (kw.isNotBlank()) {
+            watchKeywords.removeAll { it.equals(kw, ignoreCase = true) }
+            watchKeywords.add(0, kw)
+            if (watchKeywords.size > 10) watchKeywords = watchKeywords.take(10).toMutableList()
+        }
         viewModelScope.launch {
             val info = YouTubeEngine.resolveStreamInfo(video.id) ?: return@launch
             currentStreamInfo = info
@@ -317,7 +398,7 @@ fun YouTubeAppScreen(vm: YouTubeViewModel = viewModel()) {
                                 .background(if (sel) Color.White else Color(0xFF272727))
                                 .clickable {
                                     vm.selectedChip = chip
-                                    vm.loadFeed(if (chip == "Tout") "trending france" else "$chip france")
+                                    vm.loadHomeFeed(chip)
                                 }
                                 .padding(horizontal = 12.dp, vertical = 6.dp)
                         ) {

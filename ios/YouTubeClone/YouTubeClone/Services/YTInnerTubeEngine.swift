@@ -14,27 +14,70 @@ public actor YTInnerTubeEngine {
     private let cacheTTL: TimeInterval = 600 // 10 minutes
 
     private struct ClientProfile {
+        let id: Int
         let name: String
         let version: String
         let userAgent: String
         let extraFields: [String: Any]
     }
 
+    private let tvSamsungClient = ClientProfile(
+        id: 7,
+        name: "TVHTML5",
+        version: "5.20260707",
+        userAgent: "Mozilla/5.0 (SMART-TV; Linux; Tizen 2.4.0) AppleWebKit/538.1 (KHTML, like Gecko) Version/2.4.0 TV Safari/538.1",
+        extraFields: [
+            "deviceMake": "Samsung",
+            "deviceModel": "UKS9800",
+            "osName": "Tizen",
+            "osVersion": "2.4.0"
+        ]
+    )
+
+    private let visionOSClient = ClientProfile(
+        id: 101,
+        name: "VISIONOS",
+        version: "1.02",
+        userAgent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 15_7_3) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Safari/605.1.15",
+        extraFields: [
+            "deviceMake": "Apple",
+            "deviceModel": "RealityDevice17,1",
+            "osName": "visionOS",
+            "osVersion": "26.5.23O471"
+        ]
+    )
+
+    private let androidVRClient = ClientProfile(
+        id: 28,
+        name: "ANDROID_VR",
+        version: "1.60.19",
+        userAgent: "com.google.android.apps.youtube.vr.oculus/1.60.19 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip",
+        extraFields: [
+            "deviceMake": "Oculus",
+            "deviceModel": "Quest 3",
+            "osName": "Android",
+            "osVersion": "12L",
+            "androidSdkVersion": 32
+        ]
+    )
+
     private let androidClient = ClientProfile(
+        id: 3,
         name: "ANDROID",
-        version: "20.10.38",
-        userAgent: "com.google.android.youtube/20.10.38 (Linux; U; Android 14) gzip",
+        version: "21.26.364",
+        userAgent: "com.google.android.youtube/21.26.364 (Linux; U; Android 11) gzip",
         extraFields: [
             "osName": "Android",
-            "osVersion": "14",
-            "androidSdkVersion": 34
+            "osVersion": "11",
+            "androidSdkVersion": 30
         ]
     )
 
     private let iosClient = ClientProfile(
+        id: 5,
         name: "IOS",
-        version: "20.10.4",
-        userAgent: "com.google.ios.youtube/20.10.4 (iPhone16,2; U; CPU iOS 18_3_2 like Mac OS X;)",
+        version: "21.26.4",
+        userAgent: "com.google.ios.youtube/21.26.4 (iPhone16,2; U; CPU iOS 18_3_2 like Mac OS X;)",
         extraFields: [
             "deviceMake": "Apple",
             "deviceModel": "iPhone16,2",
@@ -44,10 +87,24 @@ public actor YTInnerTubeEngine {
     )
 
     private let webClient = ClientProfile(
+        id: 1,
         name: "WEB",
-        version: "2.20241114.01.00",
+        version: "2.20260708.00.00",
         userAgent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.1 Safari/605.1.15",
         extraFields: [:]
+    )
+
+    private let mwebClient = ClientProfile(
+        id: 2,
+        name: "MWEB",
+        version: "2.20260708.05.00",
+        userAgent: "Mozilla/5.0 (iPad; CPU OS 16_7_10 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1,gzip(gfe)",
+        extraFields: [
+            "deviceMake": "Apple",
+            "deviceModel": "iPad",
+            "osName": "iOS",
+            "osVersion": "16.7.10"
+        ]
     )
 
     public init() {
@@ -181,26 +238,124 @@ public actor YTInnerTubeEngine {
         return []
     }
 
-    // MARK: - 4. Fetch Personalized Home Feed Based on Watch Profile & Category Chip
-    public func fetchPersonalizedHomeFeed(chip: String, watchKeywords: [String]) async -> (videos: [YTVideo], shorts: [YTVideo]) {
-        let searchQuery: String
-        if chip != "All" && chip != "New to you" {
-            searchQuery = chip
-        } else if !watchKeywords.isEmpty {
-            // Build an adaptive query from the user's most recent watched topics/artists
-            let topKeywords = Array(watchKeywords.prefix(2)).joined(separator: " ")
-            searchQuery = topKeywords
+    // MARK: - 4. Fetch Personalized Home Feed Based on Watch Profile, Subscriptions & Category Chip
+    public func fetchPersonalizedHomeFeed(
+        chip: String,
+        watchKeywords: [String],
+        subscribedChannels: [String] = [],
+        watchedVideoIds: Set<String> = []
+    ) async -> (videos: [YTVideo], shorts: [YTVideo]) {
+        var queries: [String] = []
+
+        if chip == "New to you" {
+            let discoveryPool = [
+                "Découverte documentaire tech science France",
+                "Nouveautés musique indépendante clip",
+                "Reportage insolite histoire culture",
+                "Créateurs émergents gaming humour France"
+            ]
+            queries = Array(discoveryPool.shuffled().prefix(2))
+        } else if chip != "All" && !chip.isEmpty {
+            let chipQueries: [String: [String]] = [
+                "Music": ["Nouveautés musique clip officiel France", "Top hits musique 2025"],
+                "Gaming": ["Gaming let's play France", "Jeux vidéo gameplay nouveautés"],
+                "Live": ["Live stream direct France", "Musique lofi radio live"],
+                "Podcasts": ["Podcast interview discussion France", "Débat société culture podcast"],
+                "News": ["Actualités France journal info", "Tech économie actualité"],
+                "Tech": ["High-tech test smartphone iPhone", "Programmation IA nouveautés tech"],
+                "Sports": ["Sport résumé match highlights", "Football NBA UFC highlights"],
+                "Comedy": ["Humour stand up sketch France", "Vidéo drôle divertissement"]
+            ]
+            if let mapped = chipQueries[chip] {
+                queries = mapped
+            } else {
+                queries = ["\(chip) France", chip]
+            }
+            if let firstInterest = watchKeywords.first, !firstInterest.isEmpty {
+                queries.append("\(chip) \(firstInterest)")
+            }
         } else {
-            // Default fresh discovery feed on first launch
-            searchQuery = "Tendances France musique clip 2025"
+            // "All" — Blend recent watch/search interests, subscribed channels, and trending discovery
+            if let primary = watchKeywords.first, !primary.isEmpty {
+                queries.append(primary)
+            }
+            if watchKeywords.count > 1 {
+                let secondaryPool = Array(watchKeywords.dropFirst().prefix(4))
+                if let picked = secondaryPool.randomElement(), !picked.isEmpty {
+                    queries.append(picked)
+                }
+            }
+            if let sub = subscribedChannels.randomElement(), !sub.isEmpty {
+                queries.append(sub)
+            }
+            if queries.count < 3 {
+                let fallbacks = [
+                    "Tendances France vidéos populaires",
+                    "Musique clip officiel France 2025",
+                    "Divertissement gaming tech France"
+                ]
+                for fb in fallbacks where queries.count < 3 {
+                    queries.append(fb)
+                }
+            }
         }
 
-        async let mainVideosTask = searchVideos(query: searchQuery)
-        async let shortsTask = fetchShortsFeed(seedKeywords: watchKeywords)
+        let uniqueQueries = Array(NSOrderedSet(array: queries).compactMap { $0 as? String }.prefix(3))
 
-        let (vids, shorts) = await (mainVideosTask, shortsTask)
-        let regularVids = vids.filter { !$0.isShort }
-        return (regularVids.isEmpty ? vids : regularVids, Array(shorts.prefix(12)))
+        async let shortsTask = fetchShortsFeed(seedKeywords: watchKeywords)
+        var buckets: [[YTVideo]] = []
+        await withTaskGroup(of: [YTVideo].self) { group in
+            for q in uniqueQueries {
+                group.addTask {
+                    await self.searchVideos(query: q)
+                }
+            }
+            for await res in group {
+                buckets.append(res.filter { !$0.isShort })
+            }
+        }
+
+        let shorts = await shortsTask
+
+        // Interleave across query buckets so home feed is diverse and not dominated by 1 topic/channel
+        var merged: [YTVideo] = []
+        var seenIds = Set<String>()
+        var channelCounts: [String: Int] = [:]
+        let subSet = Set(subscribedChannels.map { $0.lowercased() })
+
+        let maxLen = buckets.map(\.count).max() ?? 0
+        for idx in 0..<maxLen {
+            for bucket in buckets where idx < bucket.count {
+                let vid = bucket[idx]
+                guard !seenIds.contains(vid.id) else { continue }
+                if chip == "New to you" && subSet.contains(vid.channelTitle.lowercased()) {
+                    continue
+                }
+                if watchedVideoIds.contains(vid.id) {
+                    continue
+                }
+                let chKey = vid.channelTitle.lowercased()
+                let count = channelCounts[chKey, default: 0]
+                if count >= 2 && merged.count < 18 {
+                    continue
+                }
+                seenIds.insert(vid.id)
+                channelCounts[chKey] = count + 1
+                merged.append(vid)
+            }
+        }
+
+        // If filtering watched videos left too few results, backfill from remaining non-short items
+        if merged.count < 8 {
+            for bucket in buckets {
+                for vid in bucket where !seenIds.contains(vid.id) {
+                    seenIds.insert(vid.id)
+                    merged.append(vid)
+                }
+            }
+        }
+
+        return (Array(merged.prefix(30)), Array(shorts.prefix(12)))
     }
 
     // MARK: - 5. Fetch Channel Videos Dynamically
@@ -210,14 +365,23 @@ public actor YTInnerTubeEngine {
         return results
     }
 
+    public func invalidatePlaybackCache(for videoId: String) {
+        playbackCache.removeValue(forKey: videoId)
+    }
+
     // MARK: - 6. Resolve Playable Video Stream FAST (Does NOT block on comments/related)
     public func resolveVideoPlayback(
         for video: YTVideo,
         userProfileKeywords: [String] = [],
-        customPipedInstance: String? = nil
+        customPipedInstance: String? = nil,
+        forceRefresh: Bool = false
     ) async -> YTResolvedVideoPlayback {
-        if let cached = playbackCache[video.id], Date().timeIntervalSince(cached.timestamp) < cacheTTL {
+        if !forceRefresh, let cached = playbackCache[video.id], Date().timeIntervalSince(cached.timestamp) < cacheTTL {
             return cached.bundle
+        }
+        if forceRefresh {
+            playbackCache.removeValue(forKey: video.id)
+            YTSequentialStreamServer.shared.clearCache(for: video.id)
         }
 
         var hlsURL: URL?
@@ -227,46 +391,179 @@ public actor YTInnerTubeEngine {
         var captions: [YTCaptionTrack] = []
         var updatedVideo = video
 
-        // Step A: Query ANDROID 20.10.38 InnerTube Player (returns direct muxed H.264+AAC MP4 itag 18 + adaptive H.264/AV1 144p..2160p 4K + M4A 140)
-        if let androidData = try? await postInnerTube(
-            endpoint: "player",
-            body: [
-                "context": makeContext(for: androidClient),
+        let fastVD = await YTBotGuardPOTProvider.shared.fastVisitorData(forceRefresh: forceRefresh)
+        let vdCtx: String? = fastVD.isEmpty ? nil : fastVD
+
+        // yt-dlp 2026 fast & reliable client cascade (all with visitorData to avoid LOGIN_REQUIRED):
+        // 1. VISIONOS (1.02, ID 101) -> NO JS, NO PO Token, 144p..4K/8K + Live HLS, HTTP 200 across 100% of video (~80ms!)
+        // 2. TV_SAMSUNG (TVHTML5 5.20260707, ID 7) -> NO PO Token, handles "Made for kids" videos via EJS n/sig
+        // 3. MWEB + BotGuard WebPO + EJS (fallback only)
+        // 4. WEB + BotGuard WebPO + EJS (fallback only)
+        // 5. ANDROID / 6. IOS (last resort)
+
+        // Step 1: VISIONOS (fastest — zero BotGuard, zero JS preprocessing, full 144p..4K..8K + HLS)
+        do {
+            let visBody: [String: Any] = [
+                "context": makeContext(for: visionOSClient, visitorData: vdCtx),
                 "videoId": video.id,
                 "contentCheckOk": true,
                 "racyCheckOk": true
-            ],
-            client: androidClient
-        ),
-        let json = try? JSONSerialization.jsonObject(with: androidData) as? [String: Any] {
-            let status = (json["playabilityStatus"] as? [String: Any])?["status"] as? String ?? "unknown"
-            let parsed = parsePlayerResponse(json, baseVideo: updatedVideo)
-            updatedVideo = parsed.video
-            if let h = parsed.hlsURL { hlsURL = h }
-            muxedFormats.append(contentsOf: parsed.muxed)
-            adaptiveVideo.append(contentsOf: parsed.adaptiveVideo)
-            adaptiveAudio.append(contentsOf: parsed.adaptiveAudio)
-            captions.append(contentsOf: parsed.captions)
-            YTDebugLogger.shared.log(.net, tag: "InnerTube", "ANDROID /player \(video.id) status=\(status) muxed=\(parsed.muxed.count) adaptiveV=\(parsed.adaptiveVideo.count) adaptiveA=\(parsed.adaptiveAudio.count) hls=\(parsed.hlsURL != nil)")
-        } else {
-            YTDebugLogger.shared.log(.error, tag: "InnerTube", "ANDROID /player failed for \(video.id)")
+            ]
+            if let visData = try? await postInnerTube(endpoint: "player", body: visBody, client: visionOSClient),
+               let json = try? JSONSerialization.jsonObject(with: visData) as? [String: Any] {
+                let status = (json["playabilityStatus"] as? [String: Any])?["status"] as? String ?? "unknown"
+                let parsed = await parsePlayerResponse(json, baseVideo: updatedVideo, pot: nil, userAgent: visionOSClient.userAgent, clientLabel: "VISIONOS")
+                updatedVideo = parsed.video
+                if let h = parsed.hlsURL { hlsURL = h }
+                muxedFormats.append(contentsOf: parsed.muxed)
+                adaptiveVideo.append(contentsOf: parsed.adaptiveVideo)
+                adaptiveAudio.append(contentsOf: parsed.adaptiveAudio)
+                captions.append(contentsOf: parsed.captions)
+                YTDebugLogger.shared.log(.net, tag: "InnerTube", "VISIONOS /player \(video.id) status=\(status) vd=\(vdCtx != nil) muxed=\(parsed.muxed.count) adaptiveV=\(parsed.adaptiveVideo.count) adaptiveA=\(parsed.adaptiveAudio.count) hls=\(parsed.hlsURL != nil)")
+            }
         }
 
-        // Step B: Query IOS 20.10.4 InnerTube Player only if ANDROID returned no streams
-        if muxedFormats.isEmpty && adaptiveVideo.isEmpty && hlsURL == nil {
-            if let iosData = try? await postInnerTube(
-                endpoint: "player",
-                body: [
-                    "context": makeContext(for: iosClient),
+        // Step 2: TV_SAMSUNG (only if VISIONOS returned no playable streams — e.g. Made for Kids)
+        if adaptiveVideo.isEmpty && hlsURL == nil {
+            if let stsVal = await YTPlayerScriptSolver.shared.signatureTimestamp() {
+                let tvBody: [String: Any] = [
+                    "context": makeContext(for: tvSamsungClient, visitorData: vdCtx),
                     "videoId": video.id,
+                    "playbackContext": ["contentPlaybackContext": ["signatureTimestamp": stsVal]],
                     "contentCheckOk": true,
                     "racyCheckOk": true
-                ],
+                ]
+                if let tvData = try? await postInnerTube(endpoint: "player", body: tvBody, client: tvSamsungClient),
+                   let json = try? JSONSerialization.jsonObject(with: tvData) as? [String: Any] {
+                    let status = (json["playabilityStatus"] as? [String: Any])?["status"] as? String ?? "unknown"
+                    let parsed = await parsePlayerResponse(json, baseVideo: updatedVideo, pot: nil, userAgent: tvSamsungClient.userAgent, clientLabel: "TV_SAMSUNG")
+                    updatedVideo = parsed.video
+                    if let h = parsed.hlsURL { hlsURL = h }
+                    for m in parsed.muxed where !muxedFormats.contains(where: { $0.itag == m.itag }) { muxedFormats.append(m) }
+                    adaptiveVideo.append(contentsOf: parsed.adaptiveVideo)
+                    adaptiveAudio.append(contentsOf: parsed.adaptiveAudio)
+                    if captions.isEmpty { captions.append(contentsOf: parsed.captions) }
+                    YTDebugLogger.shared.log(.net, tag: "InnerTube", "TV_SAMSUNG /player \(video.id) status=\(status) vd=\(vdCtx != nil) muxed=\(parsed.muxed.count) adaptiveV=\(parsed.adaptiveVideo.count) adaptiveA=\(parsed.adaptiveAudio.count) hls=\(parsed.hlsURL != nil)")
+                }
+            }
+        }
+
+        // Step 3 & 4: MWEB / WEB with lazy BotGuard WebPO + EJS (only if VISIONOS and TV_SAMSUNG both failed)
+        if adaptiveVideo.isEmpty && hlsURL == nil {
+            async let potTask = YTBotGuardPOTProvider.shared.tokens(for: video.id, forceRefresh: forceRefresh)
+            async let stsTask = YTPlayerScriptSolver.shared.signatureTimestamp()
+            let (potBundle, sts) = await (potTask, stsTask)
+            let potCtx: String? = potBundle.visitorData.isEmpty ? vdCtx : potBundle.visitorData
+
+            if !potBundle.isColdStartFallback, let stsVal = sts {
+                let mwebBody: [String: Any] = [
+                    "context": makeContext(for: mwebClient, visitorData: potCtx),
+                    "videoId": video.id,
+                    "playbackContext": [
+                        "contentPlaybackContext": [
+                            "signatureTimestamp": stsVal
+                        ]
+                    ],
+                    "serviceIntegrityDimensions": ["poToken": potBundle.playerPoToken],
+                    "contentCheckOk": true,
+                    "racyCheckOk": true
+                ]
+                if let mwebData = try? await postInnerTube(
+                    endpoint: "player",
+                    body: mwebBody,
+                    client: mwebClient
+                ),
+                let json = try? JSONSerialization.jsonObject(with: mwebData) as? [String: Any] {
+                    let status = (json["playabilityStatus"] as? [String: Any])?["status"] as? String ?? "unknown"
+                    let parsed = await parsePlayerResponse(json, baseVideo: updatedVideo, pot: potBundle.gvsPoToken, userAgent: mwebClient.userAgent, clientLabel: "MWEB")
+                    updatedVideo = parsed.video
+                    if let h = parsed.hlsURL { hlsURL = h }
+                    for m in parsed.muxed where !muxedFormats.contains(where: { $0.itag == m.itag }) { muxedFormats.append(m) }
+                    adaptiveVideo.append(contentsOf: parsed.adaptiveVideo)
+                    adaptiveAudio.append(contentsOf: parsed.adaptiveAudio)
+                    if captions.isEmpty { captions.append(contentsOf: parsed.captions) }
+                    YTDebugLogger.shared.log(.net, tag: "InnerTube", "MWEB /player \(video.id) status=\(status) pot=bg muxed=\(parsed.muxed.count) adaptiveV=\(parsed.adaptiveVideo.count) adaptiveA=\(parsed.adaptiveAudio.count) hls=\(parsed.hlsURL != nil)")
+                }
+            }
+
+            if adaptiveVideo.isEmpty && hlsURL == nil && !potBundle.isColdStartFallback, let stsVal = sts {
+                let webBody: [String: Any] = [
+                    "context": makeContext(for: webClient, visitorData: potCtx),
+                    "videoId": video.id,
+                    "playbackContext": [
+                        "contentPlaybackContext": [
+                            "signatureTimestamp": stsVal
+                        ]
+                    ],
+                    "serviceIntegrityDimensions": ["poToken": potBundle.playerPoToken],
+                    "contentCheckOk": true,
+                    "racyCheckOk": true
+                ]
+                if let webData = try? await postInnerTube(
+                    endpoint: "player",
+                    body: webBody,
+                    client: webClient
+                ),
+                let json = try? JSONSerialization.jsonObject(with: webData) as? [String: Any] {
+                    let status = (json["playabilityStatus"] as? [String: Any])?["status"] as? String ?? "unknown"
+                    let parsed = await parsePlayerResponse(json, baseVideo: updatedVideo, pot: potBundle.gvsPoToken, userAgent: webClient.userAgent, clientLabel: "WEB")
+                    updatedVideo = parsed.video
+                    if let h = parsed.hlsURL { hlsURL = h }
+                    for m in parsed.muxed where !muxedFormats.contains(where: { $0.itag == m.itag }) { muxedFormats.append(m) }
+                    adaptiveVideo.append(contentsOf: parsed.adaptiveVideo)
+                    adaptiveAudio.append(contentsOf: parsed.adaptiveAudio)
+                    if captions.isEmpty { captions.append(contentsOf: parsed.captions) }
+                    YTDebugLogger.shared.log(.net, tag: "InnerTube", "WEB /player \(video.id) status=\(status) pot=bg muxed=\(parsed.muxed.count) adaptiveV=\(parsed.adaptiveVideo.count) adaptiveA=\(parsed.adaptiveAudio.count) hls=\(parsed.hlsURL != nil)")
+                } else {
+                    YTDebugLogger.shared.log(.error, tag: "InnerTube", "WEB /player failed for \(video.id)")
+                }
+            }
+        }
+
+        // Step 5: Fallback to ANDROID if still no adaptive/HLS streams
+        if adaptiveVideo.isEmpty && hlsURL == nil {
+            let androidBody: [String: Any] = [
+                "context": makeContext(for: androidClient, visitorData: vdCtx),
+                "videoId": video.id,
+                "contentCheckOk": true,
+                "racyCheckOk": true
+            ]
+            if let androidData = try? await postInnerTube(
+                endpoint: "player",
+                body: androidBody,
+                client: androidClient
+            ),
+            let json = try? JSONSerialization.jsonObject(with: androidData) as? [String: Any] {
+                let status = (json["playabilityStatus"] as? [String: Any])?["status"] as? String ?? "unknown"
+                let parsed = await parsePlayerResponse(json, baseVideo: updatedVideo, pot: nil, userAgent: androidClient.userAgent, clientLabel: "ANDROID")
+                updatedVideo = parsed.video
+                if let h = parsed.hlsURL { hlsURL = h }
+                muxedFormats.append(contentsOf: parsed.muxed)
+                adaptiveVideo.append(contentsOf: parsed.adaptiveVideo)
+                adaptiveAudio.append(contentsOf: parsed.adaptiveAudio)
+                if captions.isEmpty { captions.append(contentsOf: parsed.captions) }
+                YTDebugLogger.shared.log(.net, tag: "InnerTube", "ANDROID /player \(video.id) status=\(status) muxed=\(parsed.muxed.count) adaptiveV=\(parsed.adaptiveVideo.count) adaptiveA=\(parsed.adaptiveAudio.count) hls=\(parsed.hlsURL != nil)")
+            } else {
+                YTDebugLogger.shared.log(.error, tag: "InnerTube", "ANDROID /player failed for \(video.id)")
+            }
+        }
+
+        // Step 6: Query IOS InnerTube Player if still no adaptive/HLS streams
+        if adaptiveVideo.isEmpty && hlsURL == nil {
+            let iosBody: [String: Any] = [
+                "context": makeContext(for: iosClient, visitorData: vdCtx),
+                "videoId": video.id,
+                "contentCheckOk": true,
+                "racyCheckOk": true
+            ]
+            if let iosData = try? await postInnerTube(
+                endpoint: "player",
+                body: iosBody,
                 client: iosClient
             ),
             let json = try? JSONSerialization.jsonObject(with: iosData) as? [String: Any] {
                 let status = (json["playabilityStatus"] as? [String: Any])?["status"] as? String ?? "unknown"
-                let parsed = parsePlayerResponse(json, baseVideo: updatedVideo)
+                let parsed = await parsePlayerResponse(json, baseVideo: updatedVideo, pot: nil, userAgent: iosClient.userAgent, clientLabel: "IOS")
                 updatedVideo = parsed.video
                 if let h = parsed.hlsURL { hlsURL = h }
                 for m in parsed.muxed where !muxedFormats.contains(where: { $0.itag == m.itag }) {
@@ -436,14 +733,25 @@ public actor YTInnerTubeEngine {
             return (AVPlayerItem(url: localURL), nil, nil)
         }
 
-        // 1. If a specific resolution is chosen (e.g. "2160p (4K)", "1440p (QHD)", "1080p", "720p", "480p", "360p", "240p", "144p")
+        // 0. Live streams MUST use YouTube's native HLS manifest (no static sidx table)
+        if playback.video.isLive, let hls = playback.hlsManifestURL {
+            let asset = AVURLAsset(
+                url: hls,
+                options: ["AVURLAssetHTTPHeaderFieldsKey": ["User-Agent": visionOSClient.userAgent]]
+            )
+            let item = AVPlayerItem(asset: asset)
+            item.preferredForwardBufferDuration = 30.0
+            return (item, nil, nil)
+        }
+
+        // 1. If a specific resolution is chosen (e.g. "4320p (8K)", "2160p (4K)", "1440p (QHD)", "1080p", "720p", "480p", "360p", "240p", "144p")
         if preferredQuality != "Auto (recommended)" && !preferredQuality.isEmpty {
             if let chosenFormat = playback.matchingVideoFormat(for: preferredQuality) {
                 if chosenFormat.isMuxed {
                     let vItem = YTSequentialStreamServer.shared.makeFastProgressivePlayerItem(format: chosenFormat)
                     return (vItem, nil, chosenFormat)
                 }
-                // Build a 5-second sequential HLS stream (`ytstream://`) combining the chosen video resolution (144p..2160p 4K) + AAC audio (`itag 140`)!
+                // Build a 5-second sequential HLS stream with 50s RAM preloading combining chosen video (144p..4K..8K) + AAC audio!
                 if let hlsItem = await YTSequentialStreamServer.shared.makeSequentialHLSPlayerItem(
                     videoFormat: chosenFormat,
                     audioFormat: playback.bestAudioFormat,
@@ -470,7 +778,7 @@ public actor YTInnerTubeEngine {
                 return (vItem, nil, chosenFormat)
             }
 
-            // If adaptiveVideoFormats was empty (e.g. iOS InnerTube client returned only hlsManifestURL), pin the HLS master playlist to the target height!
+            // If adaptiveVideoFormats was empty (e.g. client returned only hlsManifestURL), pin the HLS master playlist to the target height!
             if let hls = playback.hlsManifestURL,
                let targetH = YTResolvedVideoPlayback.targetHeight(for: preferredQuality) {
                 let pinned = await YTSequentialStreamServer.shared.makeQualityPinnedHLSPlayerItem(
@@ -493,25 +801,37 @@ public actor YTInnerTubeEngine {
             }
         }
 
-        // 2. For Auto: use native HLS if present, otherwise build a 1080p/720p sequential 5-second HLS stream (`ytstream://`)
-        if let hls = playback.hlsManifestURL {
-            let item = AVPlayerItem(url: hls)
-            item.preferredForwardBufferDuration = 5.0
-            return (item, nil, nil)
-        }
-
-        if let hdFormat = playback.adaptiveVideoFormats.first(where: { ($0.height ?? 0) >= 720 && ($0.height ?? 0) <= 1080 && $0.mimeType.contains("avc1") })
+        // 2. For Auto VOD: prefer our RAM-buffered YTSequentialStreamServer starting directly at crisp 1080p/720p H.264
+        //    (never drops to blurry 144p at start, and preloads 50s ahead in RAM for zero stutter!)
+        let preferredAutoHD = playback.adaptiveVideoFormats
+            .filter { ($0.height ?? 0) >= 720 && ($0.height ?? 0) <= 1080 && $0.mimeType.contains("avc1") }
+            .sorted { ($0.height ?? 0) > ($1.height ?? 0) }
+        if let hdFormat = preferredAutoHD.first
             ?? playback.adaptiveVideoFormats.first(where: { ($0.height ?? 0) >= 720 && ($0.height ?? 0) <= 1080 })
+            ?? playback.adaptiveVideoFormats.first(where: { $0.mimeType.contains("avc1") })
             ?? playback.adaptiveVideoFormats.first {
+            // Keep Auto variants strictly HD (>=720p H.264) so AVPlayer never starts in blurry 144p
+            let crispAutoPool = preferredAutoHD.isEmpty ? [hdFormat] : preferredAutoHD
             if let hlsItem = await YTSequentialStreamServer.shared.makeSequentialHLSPlayerItem(
                 videoFormat: hdFormat,
                 audioFormat: playback.bestAudioFormat,
                 videoId: playback.video.id,
-                allAdaptiveFormats: playback.adaptiveVideoFormats,
+                allAdaptiveFormats: crispAutoPool,
                 isAutoQuality: true
             ) {
                 return (hlsItem, nil, hdFormat)
             }
+        }
+
+        // Fallback to native HLS if sidx parsing wasn't available
+        if let hls = playback.hlsManifestURL {
+            let asset = AVURLAsset(
+                url: hls,
+                options: ["AVURLAssetHTTPHeaderFieldsKey": ["User-Agent": visionOSClient.userAgent]]
+            )
+            let item = AVPlayerItem(asset: asset)
+            item.preferredForwardBufferDuration = 45.0
+            return (item, nil, nil)
         }
 
         if let muxed = playback.muxedFormats.first {
@@ -527,17 +847,52 @@ public actor YTInnerTubeEngine {
     }
 
     // MARK: - Private InnerTube Parsers
-    private func makeContext(for client: ClientProfile) -> [String: Any] {
+    private func makeContext(for client: ClientProfile, visitorData: String? = nil) -> [String: Any] {
         var clientDict: [String: Any] = [
             "clientName": client.name,
             "clientVersion": client.version,
             "hl": "fr",
             "gl": "FR"
         ]
+        if let vd = visitorData, !vd.isEmpty {
+            clientDict["visitorData"] = vd
+        }
         for (k, v) in client.extraFields {
             clientDict[k] = v
         }
         return ["client": clientDict]
+    }
+
+    /// Updates or appends query parameters without decoding/corrupting existing percent-encoded YouTube params (`sparams`, `mime`, etc.).
+    private func safelyUpdateURL(_ url: URL, setParams: [(name: String, value: String)]) -> URL {
+        guard !setParams.isEmpty else { return url }
+        var raw = url.absoluteString
+        var allowed = CharacterSet.urlQueryAllowed
+        allowed.remove(charactersIn: "&=+%")
+
+        for (name, value) in setParams {
+            let encodedVal = value.addingPercentEncoding(withAllowedCharacters: allowed) ?? value
+            let pattern = #"([?&])"# + NSRegularExpression.escapedPattern(for: name) + #"=[^&]*"#
+            if let regex = try? NSRegularExpression(pattern: pattern),
+               let match = regex.firstMatch(in: raw, range: NSRange(raw.startIndex..., in: raw)),
+               let fullRange = Range(match.range, in: raw),
+               let prefixRange = Range(match.range(at: 1), in: raw) {
+                let prefix = String(raw[prefixRange])
+                raw.replaceSubrange(fullRange, with: "\(prefix)\(name)=\(encodedVal)")
+            } else {
+                let sep = raw.contains("?") ? "&" : "?"
+                raw += "\(sep)\(name)=\(encodedVal)"
+            }
+        }
+        return URL(string: raw) ?? url
+    }
+
+    private func appendPOT(_ url: URL, pot: String?) -> URL {
+        guard let pot, !pot.isEmpty else { return url }
+        if url.absoluteString.contains("&pot=") || url.absoluteString.contains("?pot=") {
+            return url
+        }
+        return safelyUpdateURL(url, setParams: [("pot", pot)])
     }
 
     private func postInnerTube(endpoint: String, body: [String: Any], client: ClientProfile) async throws -> Data {
@@ -548,7 +903,14 @@ public actor YTInnerTubeEngine {
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.setValue(client.userAgent, forHTTPHeaderField: "User-Agent")
+        req.setValue("\(client.id)", forHTTPHeaderField: "X-YouTube-Client-Name")
+        req.setValue(client.version, forHTTPHeaderField: "X-YouTube-Client-Version")
         req.setValue("https://www.youtube.com", forHTTPHeaderField: "Origin")
+        if let ctx = body["context"] as? [String: Any],
+           let cl = ctx["client"] as? [String: Any],
+           let vd = cl["visitorData"] as? String, !vd.isEmpty {
+            req.setValue(vd, forHTTPHeaderField: "X-Goog-Visitor-Id")
+        }
         req.httpBody = try JSONSerialization.data(withJSONObject: body)
 
         let (data, resp) = try await session.data(for: req)
@@ -560,8 +922,11 @@ public actor YTInnerTubeEngine {
 
     private func parsePlayerResponse(
         _ json: [String: Any],
-        baseVideo: YTVideo
-    ) -> (
+        baseVideo: YTVideo,
+        pot: String? = nil,
+        userAgent: String? = nil,
+        clientLabel: String = "?"
+    ) async -> (
         video: YTVideo,
         hlsURL: URL?,
         muxed: [YTVideoStreamFormat],
@@ -605,37 +970,64 @@ public actor YTInnerTubeEngine {
         var adaptiveAudio: [YTVideoStreamFormat] = []
 
         if let sd = json["streamingData"] as? [String: Any] {
-            if let hlsStr = sd["hlsManifestUrl"] as? String {
-                hlsURL = URL(string: hlsStr)
-            }
-            if let fmts = sd["formats"] as? [[String: Any]] {
-                for f in fmts {
-                    if let parsed = parseStreamFormat(f, isMuxed: true) {
-                        muxed.append(parsed)
+            let fmts = (sd["formats"] as? [[String: Any]]) ?? []
+            let rawAfmts = (sd["adaptiveFormats"] as? [[String: Any]]) ?? []
+
+            let rawWithUrl = rawAfmts.filter { ($0["url"] as? String)?.isEmpty == false }.count
+            let rawWithCipher = rawAfmts.filter { $0["signatureCipher"] != nil || $0["cipher"] != nil }.count
+
+            // Collect all unique `n` and `sig` challenges across formats and batch-solve via yt-dlp-ejs
+            var nChallenges: [String] = []
+            var sigChallenges: [String] = []
+            for f in fmts + rawAfmts {
+                if let extracted = extractRawURLAndCipher(from: f) {
+                    if let nVal = URLComponents(url: extracted.url, resolvingAgainstBaseURL: false)?
+                        .queryItems?.first(where: { $0.name == "n" })?.value, !nVal.isEmpty {
+                        nChallenges.append(nVal)
+                    }
+                    if let sVal = extracted.sig, !sVal.isEmpty {
+                        sigChallenges.append(sVal)
                     }
                 }
             }
-            if let afmts = sd["adaptiveFormats"] as? [[String: Any]] {
-                // Sort adaptive formats so H.264 (`avc1`) comes BEFORE `av01` for <=1080p, while `av01` is kept for 1440p and 2160p (4K)
-                let sortedAfmts = afmts.sorted { a, b in
-                    let mA = (a["mimeType"] as? String) ?? ""
-                    let mB = (b["mimeType"] as? String) ?? ""
-                    let isAvcA = mA.contains("avc1") ? 0 : 1
-                    let isAvcB = mB.contains("avc1") ? 0 : 1
-                    return isAvcA < isAvcB
+            let solved: (nMap: [String: String], sigMap: [String: String])
+            if !nChallenges.isEmpty || !sigChallenges.isEmpty {
+                solved = await YTPlayerScriptSolver.shared.solveChallenges(
+                    nChallenges: nChallenges,
+                    sigChallenges: sigChallenges
+                )
+            } else {
+                solved = ([:], [:])
+            }
+            YTDebugLogger.shared.log(.net, tag: "InnerTube", "[\(clientLabel)] rawAdaptive=\(rawAfmts.count) url=\(rawWithUrl) cipher=\(rawWithCipher) nReq=\(Set(nChallenges).count)/\(solved.nMap.count) sigReq=\(Set(sigChallenges).count)/\(solved.sigMap.count) potLen=\(pot?.count ?? 0)")
+
+            if let hlsStr = sd["hlsManifestUrl"] as? String, let rawHls = URL(string: hlsStr) {
+                hlsURL = appendPOT(rawHls, pot: pot)
+            }
+            for f in fmts {
+                if let parsed = parseStreamFormat(f, isMuxed: true, pot: pot, userAgent: userAgent, nMap: solved.nMap, sigMap: solved.sigMap) {
+                    muxed.append(parsed)
                 }
-                for f in sortedAfmts {
-                    if let parsed = parseStreamFormat(f, isMuxed: false) {
-                        // Keep all MP4 streams: H.264 (`avc1` 144p..1080p), AV1 (`av01` 144p..2160p 4K on iPhone 15 Pro / 16 Pro Max hardware decoder), and AAC (`mp4a` audio)
-                        if parsed.mimeType.contains("mp4") {
-                            if parsed.isAudioOnly {
-                                if !adaptiveAudio.contains(where: { $0.itag == parsed.itag && $0.audioTrackId == parsed.audioTrackId }) {
-                                    adaptiveAudio.append(parsed)
-                                }
-                            } else if parsed.mimeType.contains("avc1") || parsed.mimeType.contains("av01") || parsed.mimeType.contains("hvc1") {
-                                if !adaptiveVideo.contains(where: { $0.qualityLabel == parsed.qualityLabel && $0.width == parsed.width && $0.height == parsed.height }) {
-                                    adaptiveVideo.append(parsed)
-                                }
+            }
+            // Sort adaptive formats so H.264 (`avc1`) comes BEFORE `av01` for <=1080p, while `av01` is kept for 1440p and 2160p (4K)
+            let sortedAfmts = rawAfmts.sorted { a, b in
+                let mA = (a["mimeType"] as? String) ?? ""
+                let mB = (b["mimeType"] as? String) ?? ""
+                let isAvcA = mA.contains("avc1") ? 0 : 1
+                let isAvcB = mB.contains("avc1") ? 0 : 1
+                return isAvcA < isAvcB
+            }
+            for f in sortedAfmts {
+                if let parsed = parseStreamFormat(f, isMuxed: false, pot: pot, userAgent: userAgent, nMap: solved.nMap, sigMap: solved.sigMap) {
+                    // Keep all MP4 streams: H.264 (`avc1` 144p..1080p), AV1 (`av01` 144p..2160p 4K on iPhone 15 Pro / 16 Pro Max hardware decoder), and AAC (`mp4a` audio)
+                    if parsed.mimeType.contains("mp4") {
+                        if parsed.isAudioOnly {
+                            if !adaptiveAudio.contains(where: { $0.itag == parsed.itag && $0.audioTrackId == parsed.audioTrackId }) {
+                                adaptiveAudio.append(parsed)
+                            }
+                        } else if parsed.mimeType.contains("avc1") || parsed.mimeType.contains("av01") || parsed.mimeType.contains("hvc1") {
+                            if !adaptiveVideo.contains(where: { $0.qualityLabel == parsed.qualityLabel && $0.width == parsed.width && $0.height == parsed.height }) {
+                                adaptiveVideo.append(parsed)
                             }
                         }
                     }
@@ -696,18 +1088,71 @@ public actor YTInnerTubeEngine {
         return (updatedVideo, hlsURL, muxed, adaptiveVideo, adaptiveAudio, captions)
     }
 
-    private func parseStreamFormat(_ dict: [String: Any], isMuxed: Bool) -> YTVideoStreamFormat? {
+    private func extractRawURLAndCipher(from dict: [String: Any]) -> (url: URL, sig: String?, sp: String)? {
+        if let urlStr = dict["url"] as? String, let url = URL(string: urlStr) {
+            return (url, nil, "sig")
+        }
+        let cipherStr = (dict["signatureCipher"] as? String) ?? (dict["cipher"] as? String)
+        guard let cipherStr, !cipherStr.isEmpty else { return nil }
+        var comps = URLComponents()
+        comps.percentEncodedQuery = cipherStr
+        let items = comps.queryItems ?? []
+        guard let rawUrlStr = items.first(where: { $0.name == "url" })?.value,
+              let url = URL(string: rawUrlStr) else { return nil }
+        let sVal = items.first(where: { $0.name == "s" })?.value
+        let spVal = items.first(where: { $0.name == "sp" })?.value ?? "sig"
+        return (url, sVal, spVal)
+    }
+
+    private func parseStreamFormat(
+        _ dict: [String: Any],
+        isMuxed: Bool,
+        pot: String? = nil,
+        userAgent: String? = nil,
+        nMap: [String: String] = [:],
+        sigMap: [String: String] = [:]
+    ) -> YTVideoStreamFormat? {
         guard let itag = dict["itag"] as? Int,
-              let urlStr = dict["url"] as? String,
-              let url = URL(string: urlStr),
+              let extracted = extractRawURLAndCipher(from: dict),
               let mimeType = dict["mimeType"] as? String else {
             return nil
         }
+
+        var updates: [(name: String, value: String)] = []
+        if let rawN = URLComponents(url: extracted.url, resolvingAgainstBaseURL: false)?
+            .queryItems?.first(where: { $0.name == "n" })?.value,
+           let solvedN = nMap[rawN], !solvedN.isEmpty, solvedN != rawN {
+            updates.append(("n", solvedN))
+        }
+        if let rawSig = extracted.sig, !rawSig.isEmpty,
+           let solvedSig = sigMap[rawSig], !solvedSig.isEmpty {
+            updates.append((extracted.sp, solvedSig))
+        }
+        let solvedURL = updates.isEmpty ? extracted.url : safelyUpdateURL(extracted.url, setParams: updates)
+        let url = appendPOT(solvedURL, pot: pot)
         let isAudio = mimeType.hasPrefix("audio/")
         let qualityLabel = (dict["qualityLabel"] as? String) ?? (isAudio ? "Audio AAC" : "360p")
         let width = dict["width"] as? Int
         let height = dict["height"] as? Int
         let bitrate = dict["bitrate"] as? Int
+        let fps = dict["fps"] as? Int
+        var videoRange: String? = nil
+        if !isAudio {
+            if let colorInfo = dict["colorInfo"] as? [String: Any],
+               let transfer = colorInfo["transferCharacteristics"] as? String {
+                if transfer.contains("SMPTEST2084") || transfer.contains("PQ") {
+                    videoRange = "PQ"
+                } else if transfer.contains("ARIB_STD_B67") || transfer.contains("HLG") {
+                    videoRange = "HLG"
+                } else {
+                    videoRange = "SDR"
+                }
+            } else if qualityLabel.localizedCaseInsensitiveContains("HDR") {
+                videoRange = "PQ"
+            } else {
+                videoRange = "SDR"
+            }
+        }
         var contentLen: Int64?
         if let clStr = dict["contentLength"] as? String {
             contentLen = Int64(clStr)
@@ -749,7 +1194,10 @@ public actor YTInnerTubeEngine {
             indexRangeEnd: idxEnd,
             audioTrackId: trackId,
             audioTrackName: trackName,
-            isAudioDefault: isDefaultAudio
+            isAudioDefault: isDefaultAudio,
+            userAgent: userAgent,
+            fps: fps,
+            videoRange: videoRange
         )
     }
 

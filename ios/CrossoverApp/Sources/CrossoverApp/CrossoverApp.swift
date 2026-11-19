@@ -216,6 +216,16 @@ public struct CrossoverRootView: View {
                 showSwitcher = true
             }
         }
+        .onOpenURL { url in
+            if activeApp != .spotify {
+                SPPendingAudioImport.store(url)
+                withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) {
+                    activeAppRaw = CrossoverAppMode.spotify.rawValue
+                }
+            } else {
+                NotificationCenter.default.post(name: Notification.Name("SPImportAudioFileURL"), object: url)
+            }
+        }
     }
 }
 

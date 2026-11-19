@@ -40,6 +40,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.media3.common.MediaItem
+import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.ExoPlayer
 import coil.compose.AsyncImage
 import com.mediahub.core.*
@@ -51,8 +52,16 @@ enum class NFTab(val label: String) {
     MY_LIST("Ma liste")
 }
 
+@androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
 class NetflixViewModel(app: Application) : AndroidViewModel(app) {
-    val player: ExoPlayer = ExoPlayer.Builder(app).build()
+    val player: ExoPlayer = ExoPlayer.Builder(app)
+        .setLoadControl(
+            DefaultLoadControl.Builder()
+                .setBufferDurationsMs(45_000, 90_000, 1_200, 2_500)
+                .setPrioritizeTimeOverSizeThresholds(true)
+                .build()
+        )
+        .build()
 
     var selectedTab by mutableStateOf(NFTab.HOME)
     var homeFilter by mutableStateOf("All")

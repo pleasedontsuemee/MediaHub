@@ -6,7 +6,8 @@ public actor SPMusicEngine {
 
     private let deezerBase = "https://api.deezer.com"
     private let session: URLSession
-    private var streamCache: [String: SPAudioStream] = [:]
+    private var streamCache: [String: (timestamp: Date, stream: SPAudioStream)] = [:]
+    private let streamCacheTTL: TimeInterval = 900 // 15 minutes
 
     private var arlCookie: String = UserDefaults.standard.string(forKey: "sp_deezer_arl") ?? ""
 
@@ -363,19 +364,26 @@ public actor SPMusicEngine {
         return (title, artistName, artistId, artistPic, cover, release, tracks)
     }
 
+    public func invalidateStreamCache(for trackId: String) {
+        streamCache.removeValue(forKey: trackId)
+    }
+
     // MARK: - 4. Full-Length Audio Stream Resolver (Direct Podcast -> OpenDeezer ARL + Local Decrypt Proxy -> Teaser)
-    public func resolveAudioStream(for track: SPTrack) async -> SPAudioStream? {
+    public func resolveAudioStream(for track: SPTrack, forceRefresh: Bool = false) async -> SPAudioStream? {
         if let direct = track.directAudioURL {
             return SPAudioStream(url: direct, format: "mp3", sourceName: "Podcast Direct (MP3)", isFullLength: true)
         }
 
-        if let cached = streamCache[track.id] {
-            return cached
+        if !forceRefresh, let cached = streamCache[track.id], Date().timeIntervalSince(cached.timestamp) < streamCacheTTL {
+            return cached.stream
+        }
+        if forceRefresh {
+            streamCache.removeValue(forKey: track.id)
         }
 
         // 1. OpenDeezer ARL authenticated full-track stream via on-device Blowfish proxy
         if !arlCookie.isEmpty, let dzStream = await resolveDeezerARLStream(trackId: track.id, arl: arlCookie) {
-            streamCache[track.id] = dzStream
+            streamCache[track.id] = (Date(), dzStream)
             return dzStream
         }
 

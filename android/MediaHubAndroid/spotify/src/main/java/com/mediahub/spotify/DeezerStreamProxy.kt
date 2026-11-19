@@ -90,9 +90,28 @@ object DeezerStreamProxy {
             val effEnd = rangeEnd ?: if (totalSize > 0) totalSize - 1 else alignedStart + 524_287L
             val alignedEnd = if (totalSize > 0) minOf(totalSize - 1, ((effEnd / 2048L) + 1) * 2048L - 1) else effEnd
 
-            val fetchReq = Request.Builder().url(cdnUrl).header("Range", "bytes=$alignedStart-$alignedEnd").build()
-            val encBytes = AppHttp.client.newCall(fetchReq).execute().use { it.body?.bytes() ?: ByteArray(0) }
-            val decrypted = decryptStripes(encBytes, trackId, (alignedStart / 2048L).toInt())
+            var encBytes: ByteArray? = null
+            for (attempt in 0 until 3) {
+                try {
+                    val fetchReq = Request.Builder().url(cdnUrl).header("Range", "bytes=$alignedStart-$alignedEnd").build()
+                    AppHttp.client.newCall(fetchReq).execute().use { resp ->
+                        if (resp.isSuccessful) {
+                            val b = resp.body?.bytes()
+                            if (b != null && b.isNotEmpty()) {
+                                encBytes = b
+                            }
+                        }
+                    }
+                    if (encBytes != null) break
+                } catch (_: Exception) {}
+                if (attempt < 2) Thread.sleep(250L * (attempt + 1))
+            }
+
+            val validEnc = encBytes ?: run {
+                out.write("HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".toByteArray())
+                return
+            }
+            val decrypted = decryptStripes(validEnc, trackId, (alignedStart / 2048L).toInt())
 
             val skip = (rangeStart - alignedStart).toInt().coerceAtLeast(0)
             val want = (effEnd - rangeStart + 1).toInt().coerceAtLeast(0)

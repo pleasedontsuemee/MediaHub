@@ -20,6 +20,8 @@ public final class NFPlayerUIView: UIView {
     private var pipEnabled: Bool = true
     private var bgObserver: NSObjectProtocol?
     private var fgObserver: NSObjectProtocol?
+    private var playerStatusObserver: NSKeyValueObservation?
+    private var didDisableIdleTimer: Bool = false
 
     public override init(frame: CGRect) {
         super.init(frame: frame)
@@ -32,8 +34,29 @@ public final class NFPlayerUIView: UIView {
     }
 
     deinit {
+        playerStatusObserver?.invalidate()
+        if didDisableIdleTimer {
+            DispatchQueue.main.async {
+                UIApplication.shared.isIdleTimerDisabled = false
+            }
+        }
         if let bg = bgObserver { NotificationCenter.default.removeObserver(bg) }
         if let fg = fgObserver { NotificationCenter.default.removeObserver(fg) }
+    }
+
+    private func updateIdleTimer() {
+        let isForeground = UIApplication.shared.applicationState == .active
+        let isActivePlayback = attachedPlayer?.timeControlStatus == .playing
+        let keepAwake = isForeground && isActivePlayback
+        if keepAwake {
+            if !UIApplication.shared.isIdleTimerDisabled {
+                UIApplication.shared.isIdleTimerDisabled = true
+            }
+            didDisableIdleTimer = true
+        } else if didDisableIdleTimer {
+            UIApplication.shared.isIdleTimerDisabled = false
+            didDisableIdleTimer = false
+        }
     }
 
     private func setupLifecycleObservers() {
@@ -43,6 +66,7 @@ public final class NFPlayerUIView: UIView {
             queue: .main
         ) { [weak self] _ in
             guard let self = self else { return }
+            self.updateIdleTimer()
             let pipActive = self.pipController?.isPictureInPictureActive ?? false
             if self.backgroundPlaybackEnabled && !self.pipEnabled && !pipActive {
                 self.playerLayer.player = nil
@@ -58,6 +82,7 @@ public final class NFPlayerUIView: UIView {
             if let p = self.attachedPlayer, self.playerLayer.player !== p {
                 self.playerLayer.player = p
             }
+            self.updateIdleTimer()
         }
     }
 
@@ -72,10 +97,17 @@ public final class NFPlayerUIView: UIView {
     public func configure(player: AVPlayer, zoomToFill: Bool, pipEnabled: Bool, backgroundPlaybackEnabled: Bool) {
         self.pipEnabled = pipEnabled
         self.backgroundPlaybackEnabled = backgroundPlaybackEnabled
+        player.preventsDisplaySleepDuringVideoPlayback = true
         if attachedPlayer !== player {
             attachedPlayer = player
             playerLayer.player = player
             pipController = nil
+            playerStatusObserver?.invalidate()
+            playerStatusObserver = player.observe(\.timeControlStatus, options: [.new, .initial]) { [weak self] _, _ in
+                DispatchQueue.main.async {
+                    self?.updateIdleTimer()
+                }
+            }
         } else if playerLayer.player == nil && UIApplication.shared.applicationState != .background {
             playerLayer.player = player
         }

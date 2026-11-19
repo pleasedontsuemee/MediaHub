@@ -14,6 +14,25 @@ public enum SPTab: Int, CaseIterable {
     case premium = 3
 }
 
+public enum SPPendingAudioImport {
+    private static let lock = NSLock()
+    private static var url: URL?
+
+    public static func store(_ newURL: URL) {
+        lock.lock()
+        url = newURL
+        lock.unlock()
+    }
+
+    public static func consume() -> URL? {
+        lock.lock()
+        defer { lock.unlock() }
+        let u = url
+        url = nil
+        return u
+    }
+}
+
 @MainActor
 public final class SPAppViewModel: ObservableObject {
     // Navigation
@@ -65,6 +84,9 @@ public final class SPAppViewModel: ObservableObject {
     @Published public var isRepeatEnabled: Bool = false
     @Published public var isSkyrockMode: Bool = false
     @Published public var isSkyrockTransitioning: Bool = false
+    private var hasPlayedSkyrockJingle: Bool = false
+    private var streamRetryCounts: [String: Int] = [:]
+    private var isRecoveringStream: Bool = false
     @Published public var currentStreamLabel: String = ""
     @Published public var currentTime: TimeInterval = 0
     @Published public var duration: TimeInterval = 1
@@ -96,6 +118,16 @@ public final class SPAppViewModel: ObservableObject {
         setupRemoteCommandCenter()
         loadState()
         setupPlayerObservers()
+
+        NotificationCenter.default.addObserver(forName: Notification.Name("SPImportAudioFileURL"), object: nil, queue: .main) { [weak self] note in
+            guard let url = note.object as? URL else { return }
+            Task { @MainActor [weak self] in
+                self?.importAudioFile(from: url)
+            }
+        }
+        if let pending = SPPendingAudioImport.consume() {
+            importAudioFile(from: pending)
+        }
 
         Task {
             await loadHomeFeed()
@@ -300,7 +332,9 @@ public final class SPAppViewModel: ObservableObject {
         if recentlyPlayed.count > 20 { recentlyPlayed = Array(recentlyPlayed.prefix(20)) }
         saveState()
 
-        if isSkyrockMode {
+        streamRetryCounts[track.id] = 0
+        if isSkyrockMode && !hasPlayedSkyrockJingle {
+            hasPlayedSkyrockJingle = true
             playWithSkyrockTransition(track: track)
         } else {
             Task { await loadAndPlayTrack(track, fadeIn: false) }
@@ -310,11 +344,14 @@ public final class SPAppViewModel: ObservableObject {
     public func toggleSkyrockMode() {
         isSkyrockMode.toggle()
         if isSkyrockMode {
+            hasPlayedSkyrockJingle = false
             showToast("Mode Skyrock activé (Jingle + 1.025x)")
             if let track = currentTrack {
+                hasPlayedSkyrockJingle = true
                 playWithSkyrockTransition(track: track)
             }
         } else {
+            hasPlayedSkyrockJingle = false
             skyrockTask?.cancel()
             stopJingle()
             isSkyrockTransitioning = false
@@ -415,20 +452,34 @@ public final class SPAppViewModel: ObservableObject {
         updateNowPlayingInfo(fetchArtwork: true)
     }
 
-    private func buildPlayerItem(for track: SPTrack) async -> AVPlayerItem? {
+    private func buildPlayerItem(for track: SPTrack, forceRefresh: Bool = false) async -> AVPlayerItem? {
         if let localURL = SPOfflineDownloadManager.localFileURL(for: track.id) {
             self.currentStreamLabel = "Hors-ligne"
             return AVPlayerItem(url: localURL)
         }
-        guard let stream = await SPMusicEngine.shared.resolveAudioStream(for: track) else {
+        guard let stream = await SPMusicEngine.shared.resolveAudioStream(for: track, forceRefresh: forceRefresh) else {
             return nil
         }
         self.currentStreamLabel = stream.sourceName
         let headers = ["User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 18_3 like Mac OS X)"]
         let asset = AVURLAsset(url: stream.url, options: ["AVURLAssetHTTPHeaderFieldsKey": headers])
         let item = AVPlayerItem(asset: asset)
-        item.preferredForwardBufferDuration = 5.0
+        item.preferredForwardBufferDuration = 20.0
         return item
+    }
+
+    public func importAudioFile(from url: URL) {
+        Task {
+            guard let track = await SPOfflineDownloadManager.shared.importLocalFile(from: url) else {
+                showToast("Impossible d'importer ce fichier audio")
+                return
+            }
+            if !queue.contains(where: { $0.id == track.id }) {
+                queue.insert(track, at: 0)
+            }
+            showToast("Importé : \(track.title)")
+            playTrack(track)
+        }
     }
 
     public func togglePlayPause() {
@@ -574,9 +625,21 @@ public final class SPAppViewModel: ObservableObject {
             }
         }
 
-        endObserver = NotificationCenter.default.addObserver(forName: .AVPlayerItemDidPlayToEndTime, object: nil, queue: .main) { [weak self] _ in
+        endObserver = NotificationCenter.default.addObserver(forName: .AVPlayerItemDidPlayToEndTime, object: nil, queue: .main) { [weak self] note in
             Task { @MainActor [weak self] in
-                guard let self = self else { return }
+                guard let self = self,
+                      let endedItem = note.object as? AVPlayerItem,
+                      endedItem === self.player.currentItem else { return }
+
+                let cur = CMTimeGetSeconds(endedItem.currentTime())
+                let dur = CMTimeGetSeconds(endedItem.duration)
+                // Guard against premature end-of-stream on lock screen / HTTP drop
+                if dur.isFinite && dur > 15 && cur.isFinite && cur < dur - 5.0,
+                   let track = self.currentTrack {
+                    await self.recoverStream(for: track, resumeAt: cur)
+                    return
+                }
+
                 if self.isRepeatEnabled {
                     self.seek(to: 0)
                     self.player.play()
@@ -586,19 +649,94 @@ public final class SPAppViewModel: ObservableObject {
                 }
             }
         }
+
+        NotificationCenter.default.addObserver(forName: .AVPlayerItemFailedToPlayToEndTime, object: nil, queue: .main) { [weak self] note in
+            Task { @MainActor [weak self] in
+                guard let self = self,
+                      let failedItem = note.object as? AVPlayerItem,
+                      failedItem === self.player.currentItem,
+                      let track = self.currentTrack else { return }
+                await self.recoverStream(for: track, resumeAt: self.currentTime)
+            }
+        }
+
+        NotificationCenter.default.addObserver(forName: .AVPlayerItemPlaybackStalled, object: nil, queue: .main) { [weak self] note in
+            Task { @MainActor [weak self] in
+                guard let self = self,
+                      let stalledItem = note.object as? AVPlayerItem,
+                      stalledItem === self.player.currentItem,
+                      let track = self.currentTrack else { return }
+                let stalledAt = self.currentTime
+                try? await Task.sleep(nanoseconds: 3_500_000_000)
+                if self.currentTrack?.id == track.id && self.isPlaying && self.player.timeControlStatus != .playing && abs(self.currentTime - stalledAt) < 0.5 {
+                    await self.recoverStream(for: track, resumeAt: stalledAt)
+                }
+            }
+        }
+
+        NotificationCenter.default.addObserver(forName: SPDeezerStreamProxy.streamExpiredNotification, object: nil, queue: .main) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self = self, let track = self.currentTrack else { return }
+                await self.recoverStream(for: track, resumeAt: self.currentTime)
+            }
+        }
+    }
+
+    private func recoverStream(for track: SPTrack, resumeAt seconds: TimeInterval) async {
+        guard !isRecoveringStream, currentTrack?.id == track.id else { return }
+        let attempts = streamRetryCounts[track.id, default: 0]
+        guard attempts < 2 else {
+            self.isBuffering = false
+            self.isPlaying = false
+            self.showToast("Erreur de lecture du flux audio")
+            return
+        }
+
+        isRecoveringStream = true
+        streamRetryCounts[track.id] = attempts + 1
+        isBuffering = true
+        let delayNs = UInt64((attempts == 0 ? 400_000_000 : 1_000_000_000))
+        try? await Task.sleep(nanoseconds: delayNs)
+
+        guard currentTrack?.id == track.id else {
+            isRecoveringStream = false
+            return
+        }
+
+        await SPMusicEngine.shared.invalidateStreamCache(for: track.id)
+        guard let item = await buildPlayerItem(for: track, forceRefresh: true) else {
+            isRecoveringStream = false
+            isBuffering = false
+            isPlaying = false
+            showToast("Erreur de lecture du flux audio")
+            return
+        }
+
+        item.audioTimePitchAlgorithm = isSkyrockMode ? .varispeed : .timeDomain
+        observePlayerItem(item, trackId: track.id)
+        player.replaceCurrentItem(with: item)
+        if seconds > 1 {
+            let cm = CMTime(seconds: seconds, preferredTimescale: 600)
+            await player.seek(to: cm, toleranceBefore: .zero, toleranceAfter: .zero)
+        }
+        player.volume = 1.0
+        player.play()
+        player.rate = isSkyrockMode ? skyRate : 1.0
+        isPlaying = true
+        isBuffering = false
+        isRecoveringStream = false
+        updateNowPlayingInfo()
     }
 
     private func observePlayerItem(_ item: AVPlayerItem, trackId: String) {
         itemStatusObserver?.invalidate()
         itemStatusObserver = item.observe(\.status, options: [.new]) { [weak self] observed, _ in
             Task { @MainActor [weak self] in
-                guard let self = self else { return }
+                guard let self = self, self.currentTrack?.id == trackId else { return }
                 if observed.status == .readyToPlay {
                     self.isBuffering = false
-                } else if observed.status == .failed {
-                    self.isBuffering = false
-                    self.isPlaying = false
-                    self.showToast("Erreur de lecture du flux audio")
+                } else if observed.status == .failed, let cur = self.currentTrack {
+                    await self.recoverStream(for: cur, resumeAt: self.currentTime)
                 }
             }
         }

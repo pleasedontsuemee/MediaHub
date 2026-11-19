@@ -393,7 +393,7 @@ public enum YTCatalogData {
         watchProgress: 0.92
     )
 
-    public static let videoSarahJonasTestShort = YTVideo(
+    public static let videoDemoUserTestShort = YTVideo(
         id: "90s_local_test",
         title: "A test short for page flows :)",
         channelId: "UC_demouser",

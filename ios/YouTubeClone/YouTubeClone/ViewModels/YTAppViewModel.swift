@@ -178,7 +178,9 @@ public final class YTAppViewModel: ObservableObject {
 
     private var timeObserverToken: Any?
     private var playerStatusObserver: NSKeyValueObservation?
+    private var shortsStatusObserver: NSKeyValueObservation?
     private var itemStatusObserver: NSKeyValueObservation?
+    private var didDisableIdleTimer: Bool = false
     private var currentPlaybackBundle: YTResolvedVideoPlayback?
     private var controlsAutoHideTask: Task<Void, Never>?
     private let stateStorageURL: URL
@@ -194,6 +196,9 @@ public final class YTAppViewModel: ObservableObject {
 
     private var pendingQualitySeekTime: Double?
     private var pendingQualityShouldPlay: Bool = false
+    private var streamRecoveryCounts: [String: Int] = [:]
+    private var itemFailureFallbackStage: [String: Int] = [:]
+    private var isRecoveringStream: Bool = false
 
     public init() {
         let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
@@ -201,8 +206,10 @@ public final class YTAppViewModel: ObservableObject {
 
         // Standard HLS buffering with 5s forward buffer so AVPlayer starts as soon as the first 5s chunk arrives and never drops to .paused!
         player.automaticallyWaitsToMinimizeStalling = true
+        player.preventsDisplaySleepDuringVideoPlayback = true
         audioPlayer.automaticallyWaitsToMinimizeStalling = true
         shortsPlayer.automaticallyWaitsToMinimizeStalling = true
+        shortsPlayer.preventsDisplaySleepDuringVideoPlayback = true
 
         YTFontManager.registerBundledFonts()
         configureAudioSessionForBackgroundAndPiP()
@@ -407,6 +414,24 @@ public final class YTAppViewModel: ObservableObject {
         }
     }
 
+    private func updateIdleTimer() {
+        #if canImport(UIKit)
+        let isForeground = UIApplication.shared.applicationState == .active
+        let mainActive = (currentVideo != nil) && (player.timeControlStatus == .playing || (isPlaying && player.timeControlStatus == .waitingToPlayAtSpecifiedRate))
+        let shortsActive = (selectedTab == .shorts) && isShortsPlaying && (shortsPlayer.timeControlStatus != .paused)
+        let keepAwake = isForeground && (mainActive || shortsActive)
+        if keepAwake {
+            if !UIApplication.shared.isIdleTimerDisabled {
+                UIApplication.shared.isIdleTimerDisabled = true
+            }
+            didDisableIdleTimer = true
+        } else if didDisableIdleTimer {
+            UIApplication.shared.isIdleTimerDisabled = false
+            didDisableIdleTimer = false
+        }
+        #endif
+    }
+
     private func setupPlayerTimeObserver() {
         playerStatusObserver = player.observe(\.timeControlStatus, options: [.new]) { [weak self] p, _ in
             Task { @MainActor [weak self] in
@@ -424,10 +449,43 @@ public final class YTAppViewModel: ObservableObject {
                 @unknown default:
                     stateStr = "unknown"
                 }
+                self.updateIdleTimer()
                 YTDebugLogger.shared.log(.player, tag: "AVPlayer", "timeControlStatus -> \(stateStr)")
                 YTDebugLogger.shared.updatePlayerSummary("State: \(stateStr) | Quality: \(self.activeResolutionDimensionsText) | HLS Port: \(YTSequentialStreamServer.shared.listeningPort)")
             }
         }
+
+        shortsStatusObserver = shortsPlayer.observe(\.timeControlStatus, options: [.new]) { [weak self] _, _ in
+            Task { @MainActor [weak self] in
+                self?.updateIdleTimer()
+            }
+        }
+
+        #if canImport(UIKit)
+        NotificationCenter.default.addObserver(
+            forName: UIApplication.didBecomeActiveNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.updateIdleTimer()
+            }
+        }
+
+        NotificationCenter.default.addObserver(
+            forName: UIApplication.willResignActiveNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                if self.didDisableIdleTimer {
+                    UIApplication.shared.isIdleTimerDisabled = false
+                    self.didDisableIdleTimer = false
+                }
+            }
+        }
+        #endif
 
         let interval = CMTime(seconds: 0.25, preferredTimescale: 600)
         timeObserverToken = player.addPeriodicTimeObserver(forInterval: interval, queue: .main) { [weak self] time in
@@ -466,6 +524,63 @@ public final class YTAppViewModel: ObservableObject {
         }
 
         NotificationCenter.default.addObserver(
+            forName: .AVPlayerItemPlaybackStalled,
+            object: nil,
+            queue: .main
+        ) { [weak self] note in
+            Task { @MainActor [weak self] in
+                guard let self = self,
+                      let item = note.object as? AVPlayerItem,
+                      item === self.player.currentItem,
+                      let vid = self.currentVideo?.id else { return }
+                YTDebugLogger.shared.log(.stream, tag: "AVPlayer", "PlaybackStalled for \(vid) at \(String(format: "%.1fs", self.currentTime))")
+                self.isBuffering = true
+                // Give AVPlayer 3.5s to resume; if still stuck, refresh stream URLs at current timestamp
+                let stalledAt = self.currentTime
+                try? await Task.sleep(nanoseconds: 3_500_000_000)
+                if self.currentVideo?.id == vid && self.isPlaying && self.player.timeControlStatus != .playing && abs(self.currentTime - stalledAt) < 0.5 {
+                    await self.recoverStreamAtCurrentPosition(for: vid)
+                }
+            }
+        }
+
+        NotificationCenter.default.addObserver(
+            forName: .AVPlayerItemFailedToPlayToEndTime,
+            object: nil,
+            queue: .main
+        ) { [weak self] note in
+            Task { @MainActor [weak self] in
+                guard let self = self,
+                      let item = note.object as? AVPlayerItem,
+                      item === self.player.currentItem,
+                      let vid = self.currentVideo?.id else { return }
+                YTDebugLogger.shared.log(.error, tag: "AVPlayer", "FailedToPlayToEndTime for \(vid) at \(String(format: "%.1fs", self.currentTime))")
+                await self.recoverStreamAtCurrentPosition(for: vid)
+            }
+        }
+
+        NotificationCenter.default.addObserver(
+            forName: YTSequentialStreamServer.streamNeedsRefreshNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] note in
+            Task { @MainActor [weak self] in
+                guard let self = self,
+                      let vid = note.userInfo?["videoId"] as? String,
+                      vid == self.currentVideo?.id else { return }
+                let segIdx = (note.userInfo?["segIndex"] as? Int) ?? -1
+                let isAudio = (note.userInfo?["isAudio"] as? Bool) ?? false
+                let approxSegTime = Double(max(0, segIdx)) * (isAudio ? 10.0 : 5.2)
+                // Never interrupt smooth active playback for a far-ahead lookahead segment (>25s ahead)
+                if self.player.timeControlStatus == .playing && segIdx >= 0 && (approxSegTime - self.currentTime) > 25.0 {
+                    YTDebugLogger.shared.log(.stream, tag: "Recovery", "Deferred refresh for \(vid) seg=\(segIdx) (~\(Int(approxSegTime))s) while playing at \(String(format: "%.1fs", self.currentTime))")
+                    return
+                }
+                await self.recoverStreamAtCurrentPosition(for: vid)
+            }
+        }
+
+        NotificationCenter.default.addObserver(
             forName: .AVPlayerItemDidPlayToEndTime,
             object: nil,
             queue: .main
@@ -474,9 +589,20 @@ public final class YTAppViewModel: ObservableObject {
                 guard let self = self else { return }
                 if let item = note.object as? AVPlayerItem, item === self.shortsPlayer.currentItem {
                     // Loop active Short automatically
-                    self.shortsPlayer.seek(to: .zero)
+                    await self.shortsPlayer.seek(to: .zero)
                     self.shortsPlayer.play()
                     return
+                }
+                guard let endedItem = note.object as? AVPlayerItem, endedItem === self.player.currentItem else {
+                    return
+                }
+                // Guard against premature end-of-stream from HTTP drop mid-video
+                if self.duration > 15 && self.currentTime < self.duration - 5.0 {
+                    if let vid = self.currentVideo?.id {
+                        YTDebugLogger.shared.log(.stream, tag: "AVPlayer", "Premature DidPlayToEndTime at \(String(format: "%.1fs", self.currentTime))/\(String(format: "%.1fs", self.duration)) — recovering")
+                        await self.recoverStreamAtCurrentPosition(for: vid)
+                        return
+                    }
                 }
                 if self.isLoopVideoEnabled {
                     self.seek(to: 0)
@@ -556,16 +682,7 @@ public final class YTAppViewModel: ObservableObject {
                         logDetails = events.map { "status=\($0.errorStatusCode) domain=\($0.errorDomain) comment=\($0.errorComment ?? "")" }.joined(separator: " | ")
                     }
                     YTDebugLogger.shared.log(.error, tag: "ItemStatus", "\(videoId) -> FAILED: \(errMsg) [code=\(nsErr?.code ?? -1), domain=\(nsErr?.domain ?? "")] \(logDetails)")
-                    // Automatic fallback to muxed 360p (itag 18) if HLS/adaptive failed!
-                    if let bundle = self.currentPlaybackBundle, bundle.video.id == videoId, let muxed = bundle.muxedFormats.first {
-                        YTDebugLogger.shared.log(.stream, tag: "Fallback", "Falling back to progressive muxed itag \(muxed.itag) for \(videoId)")
-                        let fallbackItem = YTSequentialStreamServer.shared.makeFastProgressivePlayerItem(format: muxed)
-                        self.hasSeparateAudioTrack = false
-                        self.audioPlayer.pause()
-                        self.audioPlayer.replaceCurrentItem(with: nil)
-                        self.player.replaceCurrentItem(with: fallbackItem)
-                        self.player.playImmediately(atRate: self.playbackSpeed)
-                    }
+                    await self.handlePlayerItemFailureFallback(for: videoId)
                 @unknown default:
                     break
                 }
@@ -573,9 +690,93 @@ public final class YTAppViewModel: ObservableObject {
         }
     }
 
+    /// Automatic codec/HDR fallback ladder when AVPlayerItem fails (e.g., CoreMedia -12927 on 10-bit AV1 HDR or 8K):
+    /// Stage 0 -> 1: Native YouTube VISIONOS HLS pinned to requested resolution + HDR (vp09.02 PQ HDR)
+    /// Stage 1 -> 2: Native YouTube VISIONOS HLS pinned to requested resolution SDR (4K/1080p SDR)
+    /// Stage 2 -> 3: Local sequential H.264 (`avc1`) 1080p60/720p (guaranteed hardware decode on all iPhones)
+    /// Stage 3 -> 4: Muxed progressive fallback (`itag 18`)
+    private func handlePlayerItemFailureFallback(for videoId: String) async {
+        guard let bundle = self.currentPlaybackBundle,
+              bundle.video.id == videoId,
+              self.currentVideo?.id == videoId else { return }
+
+        let stage = itemFailureFallbackStage[videoId, default: 0]
+        itemFailureFallbackStage[videoId] = stage + 1
+        let resumeTime = currentTime
+        let shouldPlay = isPlaying
+        let requestedH = YTResolvedVideoPlayback.targetHeight(for: selectedQuality) ?? 2160
+        let wantsHDR = activeResolutionDimensionsText.localizedCaseInsensitiveContains("HDR")
+            || selectedQuality.localizedCaseInsensitiveContains("HDR")
+
+        var nextItem: AVPlayerItem?
+        var nextLabel: String?
+
+        if stage == 0, let hls = bundle.hlsManifestURL {
+            YTDebugLogger.shared.log(.stream, tag: "Fallback", "Stage 1: Switching \(videoId) to VISIONOS HLS (target=\(requestedH)p hdr=\(wantsHDR))")
+            let pinned = await YTSequentialStreamServer.shared.makeQualityPinnedHLSPlayerItem(
+                from: hls,
+                targetHeight: min(requestedH, 2160),
+                videoId: videoId,
+                preferHDR: wantsHDR
+            )
+            nextItem = pinned.item
+            if let w = pinned.width, let h = pinned.height {
+                nextLabel = wantsHDR ? "\(h)p HDR (\(w)×\(h))" : "\(h)p (\(w)×\(h))"
+            }
+        } else if stage == 1, let hls = bundle.hlsManifestURL {
+            YTDebugLogger.shared.log(.stream, tag: "Fallback", "Stage 2: Switching \(videoId) to VISIONOS HLS SDR (target=\(min(requestedH, 2160))p)")
+            let pinned = await YTSequentialStreamServer.shared.makeQualityPinnedHLSPlayerItem(
+                from: hls,
+                targetHeight: min(requestedH, 2160),
+                videoId: videoId,
+                preferHDR: false
+            )
+            nextItem = pinned.item
+            if let w = pinned.width, let h = pinned.height {
+                nextLabel = "\(h)p SDR (\(w)×\(h))"
+            }
+        } else if stage <= 2,
+                  let avcFmt = bundle.adaptiveVideoFormats
+                    .filter({ $0.mimeType.contains("avc1") })
+                    .sorted(by: { ($0.height ?? 0) > ($1.height ?? 0) })
+                    .first {
+            YTDebugLogger.shared.log(.stream, tag: "Fallback", "Stage 3: Switching \(videoId) to H.264 \(avcFmt.qualityLabel) (itag \(avcFmt.itag))")
+            nextItem = await YTSequentialStreamServer.shared.makeSequentialHLSPlayerItem(
+                videoFormat: avcFmt,
+                audioFormat: bundle.bestAudioFormat,
+                videoId: videoId
+            )
+            if let w = avcFmt.width, let h = avcFmt.height {
+                nextLabel = "\(avcFmt.qualityLabel) (\(w)×\(h))"
+            }
+        } else if stage <= 3, let muxed = bundle.muxedFormats.first {
+            YTDebugLogger.shared.log(.stream, tag: "Fallback", "Stage 4: Switching \(videoId) to progressive muxed itag \(muxed.itag)")
+            nextItem = YTSequentialStreamServer.shared.makeFastProgressivePlayerItem(format: muxed)
+            nextLabel = muxed.qualityLabel
+        }
+
+        guard let item = nextItem, self.currentVideo?.id == videoId else { return }
+        if let lbl = nextLabel {
+            self.activeResolutionDimensionsText = lbl
+        }
+        self.pendingQualitySeekTime = resumeTime > 1.0 ? resumeTime : nil
+        self.pendingQualityShouldPlay = shouldPlay
+        self.hasSeparateAudioTrack = false
+        self.audioPlayer.pause()
+        self.audioPlayer.replaceCurrentItem(with: nil)
+        self.observePlayerItem(item, videoId: videoId)
+        self.player.replaceCurrentItem(with: item)
+        if shouldPlay {
+            self.player.play()
+            self.player.rate = self.playbackSpeed
+        }
+    }
+
     // MARK: - Open & Play Video (Main Watch Player)
     public func openVideo(_ video: YTVideo, expandPlayer: Bool = true) {
         YTDebugLogger.shared.log(.ui, tag: "Watch", "openVideo id=\(video.id) title=\"\(video.title)\"")
+        // Immediately stop all background downloads/prefetchers from any previously playing video
+        YTSequentialStreamServer.shared.cancelAllWork(exceptVideoId: video.id)
         // Pause Shorts player if active
         shortsPlayer.pause()
         isShortsPlaying = false
@@ -598,8 +799,63 @@ public final class YTAppViewModel: ObservableObject {
         }
 
         Task {
+            streamRecoveryCounts[video.id] = 0
+            itemFailureFallbackStage[video.id] = 0
             await prepareStream(for: video, autoPlay: true)
         }
+    }
+
+    public func recoverStreamAtCurrentPosition(for videoId: String) async {
+        guard !isRecoveringStream,
+              let video = currentVideo,
+              video.id == videoId else { return }
+        let attempts = streamRecoveryCounts[videoId, default: 0]
+        guard attempts < 3 else {
+            YTDebugLogger.shared.log(.error, tag: "Recovery", "Max stream recovery attempts reached for \(videoId)")
+            isBuffering = false
+            return
+        }
+
+        isRecoveringStream = true
+        streamRecoveryCounts[videoId] = attempts + 1
+        let resumeTime = max(0, currentTime)
+        let shouldPlay = isPlaying
+        isBuffering = true
+        YTDebugLogger.shared.log(.stream, tag: "Recovery", "Refreshing stream for \(videoId) at \(String(format: "%.1fs", resumeTime)) (attempt \(attempts + 1))")
+
+        let resolved = await YTInnerTubeEngine.shared.resolveVideoPlayback(
+            for: video,
+            userProfileKeywords: watchProfileKeywords,
+            customPipedInstance: customPipedInstanceURL,
+            forceRefresh: true
+        )
+        guard currentVideo?.id == videoId else {
+            isRecoveringStream = false
+            return
+        }
+        self.currentPlaybackBundle = resolved
+        self.pendingQualitySeekTime = resumeTime
+        self.pendingQualityShouldPlay = shouldPlay
+
+        let (videoItem, audioItem, _) = await YTInnerTubeEngine.shared.makeAVPlayerItems(
+            for: resolved,
+            preferredQuality: selectedQuality
+        )
+        guard currentVideo?.id == videoId else {
+            isRecoveringStream = false
+            return
+        }
+        observePlayerItem(videoItem, videoId: videoId)
+        player.replaceCurrentItem(with: videoItem)
+        if let aItem = audioItem {
+            hasSeparateAudioTrack = true
+            audioPlayer.replaceCurrentItem(with: aItem)
+        } else {
+            hasSeparateAudioTrack = false
+            audioPlayer.pause()
+            audioPlayer.replaceCurrentItem(with: nil)
+        }
+        isRecoveringStream = false
     }
 
     public func prepareStream(for video: YTVideo, autoPlay: Bool) async {
@@ -658,6 +914,7 @@ public final class YTAppViewModel: ObservableObject {
         }
         isPlaying = autoPlay
         isBuffering = false
+        updateIdleTimer()
         updateNowPlayingInfo(fetchArtwork: true)
 
         // 3. Load subtitles, related videos, and real comments in the background without blocking video startup!
@@ -744,6 +1001,7 @@ public final class YTAppViewModel: ObservableObject {
             shortsPlayer.play()
             isShortsPlaying = true
         }
+        updateIdleTimer()
     }
 
     // MARK: - Main Player Controls & True Fullscreen Orientation
@@ -763,6 +1021,7 @@ public final class YTAppViewModel: ObservableObject {
             }
             isPlaying = true
         }
+        updateIdleTimer()
         updateNowPlayingInfo()
     }
 
@@ -824,6 +1083,7 @@ public final class YTAppViewModel: ObservableObject {
     public func changeQuality(_ quality: String) {
         selectedQuality = quality
         guard let video = currentVideo else { return }
+        itemFailureFallbackStage[video.id] = 0
         let savedTime = currentTime
         let wasPlaying = isPlaying
 
@@ -922,6 +1182,7 @@ public final class YTAppViewModel: ObservableObject {
     }
 
     public func closeMiniPlayer() {
+        YTSequentialStreamServer.shared.cancelAllWork(exceptVideoId: nil)
         player.pause()
         audioPlayer.pause()
         isPlaying = false
@@ -929,6 +1190,7 @@ public final class YTAppViewModel: ObservableObject {
             currentVideo = nil
             isPlayerExpanded = false
         }
+        updateIdleTimer()
         updateNowPlayingInfo()
     }
 
@@ -944,9 +1206,13 @@ public final class YTAppViewModel: ObservableObject {
         let activeChip = chip ?? selectedHomeChip
         isLoadingFeed = true
 
+        let subNames = channels.filter { $0.isSubscribed }.map(\.title)
+        let watchedIds = Set(watchHistory.map(\.id))
         let (fetchedVideos, fetchedShorts) = await YTInnerTubeEngine.shared.fetchPersonalizedHomeFeed(
             chip: activeChip,
-            watchKeywords: watchProfileKeywords
+            watchKeywords: watchProfileKeywords,
+            subscribedChannels: subNames,
+            watchedVideoIds: watchedIds
         )
 
         if !fetchedVideos.isEmpty {
@@ -1118,6 +1384,9 @@ public final class YTAppViewModel: ObservableObject {
         } else {
             likedVideoIds.insert(videoId)
             dislikedVideoIds.remove(videoId)
+            if let cur = currentVideo, cur.id == videoId {
+                recordInterest(from: cur)
+            }
         }
         savePersistedUserState()
     }

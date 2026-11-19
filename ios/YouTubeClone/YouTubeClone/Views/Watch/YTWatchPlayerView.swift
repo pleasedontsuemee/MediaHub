@@ -75,6 +75,7 @@ public final class YTPlayerUIView: UIView {
     public func configure(player: AVPlayer, zoomToFill: Bool, pipEnabled: Bool, backgroundPlaybackEnabled: Bool) {
         self.pipEnabled = pipEnabled
         self.backgroundPlaybackEnabled = backgroundPlaybackEnabled
+        player.preventsDisplaySleepDuringVideoPlayback = true
         if attachedPlayer !== player {
             attachedPlayer = player
             playerLayer.player = player

@@ -13,6 +13,7 @@ public final class SPDeezerStreamProxy {
     private var trackURLs: [String: URL] = [:]
     private var trackSizes: [String: Int64] = [:]
     private let lock = NSLock()
+    public static let streamExpiredNotification = Notification.Name("SPDeezerStreamExpiredNotification")
 
     private init() {}
 
@@ -23,12 +24,26 @@ public final class SPDeezerStreamProxy {
                 let params = NWParameters.tcp
                 let l = try NWListener(using: params, on: .any)
                 self.listener = l
+                var resumed = false
                 l.stateUpdateHandler = { [weak self] state in
-                    if case .ready = state, let p = l.port?.rawValue {
-                        self?.port = p
-                        cont.resume(returning: p)
-                    } else if case .failed = state {
-                        cont.resume(returning: 0)
+                    switch state {
+                    case .ready:
+                        if let p = l.port?.rawValue {
+                            self?.port = p
+                            if !resumed {
+                                resumed = true
+                                cont.resume(returning: p)
+                            }
+                        }
+                    case .failed, .cancelled:
+                        self?.port = 0
+                        self?.listener = nil
+                        if !resumed {
+                            resumed = true
+                            cont.resume(returning: 0)
+                        }
+                    default:
+                        break
                     }
                 }
                 l.newConnectionHandler = { [weak self] conn in
@@ -187,12 +202,44 @@ public final class SPDeezerStreamProxy {
                 let effectiveEnd = rangeEnd ?? (totalSize > 0 ? totalSize - 1 : alignedStart + 524_287)
                 let alignedEnd = totalSize > 0 ? min(totalSize - 1, ((effectiveEnd / 2048) + 1) * 2048 - 1) : effectiveEnd
 
-                var fetchReq = URLRequest(url: cdnURL)
-                fetchReq.setValue("bytes=\(alignedStart)-\(alignedEnd)", forHTTPHeaderField: "Range")
-                let (encData, _) = try await URLSession.shared.data(for: fetchReq)
+                var encData: Data? = nil
+                var lastStatus = 0
+                for attempt in 0..<3 {
+                    var fetchReq = URLRequest(url: cdnURL)
+                    fetchReq.setValue("bytes=\(alignedStart)-\(alignedEnd)", forHTTPHeaderField: "Range")
+                    fetchReq.timeoutInterval = 10
+                    if let (d, resp) = try? await URLSession.shared.data(for: fetchReq),
+                       let http = resp as? HTTPURLResponse {
+                        lastStatus = http.statusCode
+                        if (200..<300).contains(http.statusCode) && !d.isEmpty {
+                            encData = d
+                            break
+                        }
+                        if http.statusCode == 403 || http.statusCode == 410 {
+                            break
+                        }
+                    }
+                    if attempt < 2 {
+                        try? await Task.sleep(nanoseconds: UInt64(250_000_000 * (attempt + 1)))
+                    }
+                }
+
+                guard let validEncData = encData else {
+                    if lastStatus == 403 || lastStatus == 410 {
+                        DispatchQueue.main.async {
+                            NotificationCenter.default.post(
+                                name: SPDeezerStreamProxy.streamExpiredNotification,
+                                object: nil,
+                                userInfo: ["trackId": cleanId]
+                            )
+                        }
+                    }
+                    self.sendResponse(conn, status: "502 Bad Gateway", headers: ["Content-Length": "0"], body: Data())
+                    return
+                }
 
                 let startChunk = Int(alignedStart / 2048)
-                let decryptedAligned = Self.decryptTrackData(encData, trackId: cleanId, startChunkIndex: startChunk)
+                let decryptedAligned = Self.decryptTrackData(validEncData, trackId: cleanId, startChunkIndex: startChunk)
 
                 let skipHead = Int(rangeStart - alignedStart)
                 let desiredLen = Int(effectiveEnd - rangeStart + 1)

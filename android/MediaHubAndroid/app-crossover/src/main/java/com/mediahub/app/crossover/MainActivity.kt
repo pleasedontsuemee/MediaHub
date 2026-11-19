@@ -1,6 +1,7 @@
 package com.mediahub.app.crossover
 
 import android.content.Context
+import android.content.Intent
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -26,6 +27,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.mediahub.core.CrossoverBus
 import com.mediahub.netflix.NetflixAppScreen
+import com.mediahub.spotify.PendingAudioImport
 import com.mediahub.spotify.SpotifyAppScreen
 import com.mediahub.youtube.YouTubeAppScreen
 
@@ -38,12 +40,13 @@ enum class AppMode(val title: String, val subtitle: String, val accent: Color, v
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        val hasAudioImport = handleAudioIntent(intent)
         enableEdgeToEdge()
         setContent {
             val ctx = LocalContext.current
             val prefs = remember { ctx.getSharedPreferences("crossover_prefs", Context.MODE_PRIVATE) }
             var activeMode by remember {
-                val saved = prefs.getString("active_app", AppMode.YOUTUBE.name)
+                val saved = if (hasAudioImport) AppMode.SPOTIFY.name else prefs.getString("active_app", AppMode.YOUTUBE.name)
                 mutableStateOf(AppMode.entries.firstOrNull { it.name == saved } ?: AppMode.YOUTUBE)
             }
             var showSwitcher by remember { mutableStateOf(false) }
@@ -128,5 +131,20 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        handleAudioIntent(intent)
+    }
+
+    private fun handleAudioIntent(intent: Intent?): Boolean {
+        if (intent?.action == Intent.ACTION_VIEW) {
+            intent.data?.let {
+                PendingAudioImport.pendingUri = it
+                return true
+            }
+        }
+        return false
     }
 }

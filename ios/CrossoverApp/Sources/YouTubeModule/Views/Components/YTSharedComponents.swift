@@ -104,7 +104,7 @@ public struct YTTopHeaderBarView: View {
     }
 }
 
-// MARK: - 2. User Avatar Circle ("S" Sarah Jonas)
+// MARK: - 2. User Avatar Circle ("S" Demo User)
 public struct YTUserAvatarBadge: View {
     public let letter: String
     public let size: CGFloat

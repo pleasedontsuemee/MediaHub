@@ -38,7 +38,9 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.media3.common.MediaItem
+import androidx.media3.common.PlaybackException
 import androidx.media3.common.PlaybackParameters
+import androidx.media3.common.Player
 import androidx.media3.exoplayer.ExoPlayer
 import coil.compose.AsyncImage
 import com.mediahub.core.*
@@ -55,10 +57,18 @@ enum class SPTab(val label: String) {
     SETTINGS("Réglages")
 }
 
+object PendingAudioImport {
+    @Volatile
+    var pendingUri: Uri? = null
+}
+
 class SpotifyViewModel(app: Application) : AndroidViewModel(app) {
     val player: ExoPlayer = ExoPlayer.Builder(app).build()
     private var jinglePlayer: MediaPlayer? = null
     private var skyJob: Job? = null
+    private var hasPlayedSkyrockJingle = false
+    private val streamRetryCounts = mutableMapOf<String, Int>()
+    private var isRecoveringStream = false
 
     var selectedTab by mutableStateOf(SPTab.HOME)
     var homeData by mutableStateOf<SPHomeData?>(null)
@@ -87,7 +97,64 @@ class SpotifyViewModel(app: Application) : AndroidViewModel(app) {
     init {
         SpotifyEngine.init(app)
         arlDraft = SpotifyEngine.getARL()
+        player.addListener(object : Player.Listener {
+            override fun onIsPlayingChanged(isPlayingNow: Boolean) {
+                isPlaying = isPlayingNow
+            }
+
+            override fun onPlaybackStateChanged(playbackState: Int) {
+                if (playbackState == Player.STATE_ENDED) {
+                    val dur = player.duration
+                    val pos = player.currentPosition
+                    val track = currentTrack
+                    if (track != null && dur > 15_000L && pos in 0L until (dur - 5_000L)) {
+                        recoverStream(track, pos)
+                    } else if (queue.isNotEmpty() && track != null) {
+                        val idx = queue.indexOfFirst { it.id == track.id }
+                        if (idx >= 0) {
+                            playTrack(queue[(idx + 1) % queue.size])
+                        }
+                    }
+                }
+            }
+
+            override fun onPlayerError(error: PlaybackException) {
+                val track = currentTrack ?: return
+                recoverStream(track, player.currentPosition.coerceAtLeast(0L))
+            }
+        })
+        PendingAudioImport.pendingUri?.let { uri ->
+            PendingAudioImport.pendingUri = null
+            importAudioUris(listOf(uri), autoPlayFirst = true)
+        }
         loadHome()
+    }
+
+    private fun recoverStream(track: SPTrack, resumePosMs: Long) {
+        if (isRecoveringStream || currentTrack?.id != track.id) return
+        val attempts = streamRetryCounts[track.id] ?: 0
+        if (attempts >= 2) {
+            isPlaying = false
+            return
+        }
+        isRecoveringStream = true
+        streamRetryCounts[track.id] = attempts + 1
+        viewModelScope.launch {
+            delay(if (attempts == 0) 400L else 1000L)
+            if (currentTrack?.id == track.id) {
+                val resolved = SpotifyEngine.resolvePlayableStream(track)
+                if (resolved != null) {
+                    streamLabel = resolved.second
+                    player.setMediaItem(MediaItem.fromUri(resolved.first))
+                    player.playbackParameters = if (isSkyrockMode) PlaybackParameters(1.025f, 1.025f) else PlaybackParameters(1f, 1f)
+                    player.prepare()
+                    if (resumePosMs > 1000L) player.seekTo(resumePosMs)
+                    player.play()
+                    isPlaying = true
+                }
+            }
+            isRecoveringStream = false
+        }
     }
 
     fun loadHome() {
@@ -113,8 +180,10 @@ class SpotifyViewModel(app: Application) : AndroidViewModel(app) {
         if (newQueue != null) queue = newQueue
         currentTrack = track
         isPlaying = true
+        streamRetryCounts[track.id] = 0
 
-        if (isSkyrockMode) {
+        if (isSkyrockMode && !hasPlayedSkyrockJingle) {
+            hasPlayedSkyrockJingle = true
             playWithSkyrock(track)
         } else {
             viewModelScope.launch { loadAndPlay(track, fadeIn = false) }
@@ -124,8 +193,13 @@ class SpotifyViewModel(app: Application) : AndroidViewModel(app) {
     fun toggleSkyrock() {
         isSkyrockMode = !isSkyrockMode
         if (isSkyrockMode) {
-            currentTrack?.let { playWithSkyrock(it) }
+            hasPlayedSkyrockJingle = false
+            currentTrack?.let {
+                hasPlayedSkyrockJingle = true
+                playWithSkyrock(it)
+            }
         } else {
+            hasPlayedSkyrockJingle = false
             skyJob?.cancel()
             stopJingle()
             player.volume = 1f
@@ -197,7 +271,7 @@ class SpotifyViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    fun importAudioUris(uris: List<Uri>) {
+    fun importAudioUris(uris: List<Uri>, autoPlayFirst: Boolean = true) {
         val ctx = getApplication<Application>()
         val dir = File(ctx.filesDir, "sp_imports").apply { mkdirs() }
         val imported = mutableListOf<SPTrack>()
@@ -217,6 +291,9 @@ class SpotifyViewModel(app: Application) : AndroidViewModel(app) {
             } catch (_: Exception) {}
         }
         downloadedTracks = imported + downloadedTracks
+        if (autoPlayFirst && imported.isNotEmpty()) {
+            playTrack(imported.first(), newQueue = imported + downloadedTracks)
+        }
     }
 
     private fun stopJingle() {

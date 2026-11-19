@@ -235,7 +235,7 @@ public struct YTEngagementPanelDrawerView: View {
 
             Rectangle().fill(YTTheme.separator).frame(height: 0.5)
 
-            // Bottom Chat Input Bar (`Avatar S` + `"Chat publicly as Sarah Jonas... (slow..."` + `$` Super Chat icon)
+            // Bottom Chat Input Bar (`Avatar S` + `"Chat publicly as Demo User... (slow..."` + `$` Super Chat icon)
             HStack(spacing: 12) {
                 YTUserAvatarBadge(letter: "S", size: 32, backgroundHex: "#5C4033")
 

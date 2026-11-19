@@ -100,6 +100,9 @@ public struct SPContentView: View {
             SPNowPlayingView()
                 .environmentObject(appVM)
         }
+        .onOpenURL { url in
+            appVM.importAudioFile(from: url)
+        }
     }
 
     private func tabButton(tab: SPTab, title: String, icon: String, inactive: String) -> some View {

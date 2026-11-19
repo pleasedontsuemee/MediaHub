@@ -44,7 +44,7 @@ public final class YTDebugLogger: ObservableObject, @unchecked Sendable {
     @Published public var livePlayerStateSummary: String = "Idle"
 
     private let queue = DispatchQueue(label: "com.ytmine.debuglogger")
-    private let maxEntries = 1000
+    private let maxEntries = 2500
 
     private init() {
         log(.info, tag: "App", "YTDebugLogger initialized (bundle: \(Bundle.main.bundleIdentifier ?? "unknown"))")
